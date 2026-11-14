@@ -1,57 +1,103 @@
-# dca —— 開發環境代管（agent → controller → devbox）
+# devbox-controller
 
-三個角色，全部用人類可讀的名字，不用 A／B／C 代號：
+A small HTTP service that hands out disposable development containers ("devboxes") to an AI agent, without ever giving the agent a Docker socket.
 
+Three roles, no A/B/C codenames:
+
+```mermaid
+flowchart LR
+    agent["agent container<br/>runs the coding task<br/>holds only DCA_TOKEN"]
+    subgraph host["pi5 host"]
+        gw["docker0 gateway<br/>172.17.0.1:47123"]
+        ctrl["controller<br/>devbox-controller container<br/>network_mode: host<br/>docker socket + git credentials"]
+        dbx["devbox-TASK<br/>one container per task<br/>cap_drop: ALL<br/>no-new-privileges<br/>no socket, no git token<br/>only /workspace mounted"]
+    end
+    gh["GitHub"]
+
+    agent -- "HTTP + Bearer token" --> gw
+    gw --> ctrl
+    ctrl -- "docker run, fully fixed flags" --> dbx
+    ctrl -- "git clone / git push on the host" --> gh
+    agent -. "cannot reach: no socket, no creds" .-> dbx
 ```
-agent        ──HTTP + Bearer token──▶  controller（唯一持 docker socket）
-（你的 agent 容器，host 網路）            │ docker run（參數全部寫死在 app.py）
-                                          ▼
-                                        devbox（開發環境，cap_drop=ALL、
-                                                no-new-privileges、無 socket、零 git 憑證）
-```
 
-| 名字 | 是甚麼 | 持有 | 執行方式 |
+| Role | What it is | What it holds | How it runs |
 |---|---|---|---|
-| **agent** | 你的 agent 容器，跑 coding task | `DCA_TOKEN`（`DCA_URL` 可不設） | 預設 bridge 即可，經 `172.17.0.1:47123` 呼叫 |
-| **controller** | `devbox-controller` 容器，跑 `app.py` | docker socket、git 憑證 | `network_mode: host`，監聽 `0.0.0.0:47123` |
-| **devbox** | `devbox-<task>` 容器，一個 task 一個 | 只有 `/workspace` | 由 controller 動態建立 |
+| **agent** | Your agent container, executing coding tasks | `DCA_TOKEN` (`DCA_URL` optional) | Default bridge is fine; reaches the controller via the bridge gateway `172.17.0.1:47123` |
+| **controller** | `devbox-controller` container running `app.py` | Docker socket, git credentials | `network_mode: host`, listens on `0.0.0.0:47123` |
+| **devbox** | `devbox-<task>` container, one per task | Only its `/workspace` | Created on demand by the controller |
 
-**不需要 `docker network create`。** controller 用 `network_mode: host`，agent 留在 docker 默認 bridge，兩者經 docker0 網關（`172.17.0.1`）互通，認證只靠 Bearer token。
+**No `docker network create` anywhere.** The controller uses host networking; the agent stays on the default bridge. They meet at the bridge gateway, and the only authentication is a Bearer token.
 
-> 「哪個 IP」這個問題的答案：**agent 容器看宿主 = 它所在 bridge 的網關**，默認 bridge 就是 `172.17.0.1`（除非宿主 `daemon.json` 改過 `bip`）。`dc` 未設 `DCA_URL` 時會依序探測 `172.17.0.1` → `127.0.0.1`，兩個都是常數，不需要固定 subnet。
+> Answering "which IP?" — **a container sees its host as the gateway of the bridge it sits on.** For the default bridge that is `172.17.0.1`, unless the host's `daemon.json` overrides `bip`. When `DCA_URL` is unset, `dc` probes the local default gateway first, then `127.0.0.1`. Both are constants; no fixed subnet is needed.
 
-## 為什麼這樣切
+## Lifecycle
 
-| 問題 | 處理 |
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent as agent container
+    participant Ctrl as controller
+    participant Dev as devbox-TASK
+    participant GH as GitHub
+
+    Agent->>Ctrl: GET /v1/templates
+    Ctrl-->>Agent: base, node22, python312
+    Agent->>Ctrl: POST /v1/tasks {template, task}
+    Ctrl->>Dev: docker run (image@sha256 digest, fixed flags)
+    Ctrl-->>Agent: 201 {task, host_path}
+    Agent->>Ctrl: POST /v1/tasks/TASK/clone {url, dir}
+    Ctrl->>GH: git clone (host side, credentials stay on host)
+    Ctrl-->>Agent: {path, rel}
+    Agent->>Ctrl: POST /v1/tasks/TASK/exec {cmd: [...]}
+    Ctrl->>Dev: docker exec
+    Dev-->>Agent: {stdout, stderr, exit_code}
+    Agent->>Ctrl: POST /v1/tasks/TASK/push {dir}
+    Ctrl->>GH: git push
+    Agent->>Ctrl: DELETE /v1/tasks/TASK
+    Ctrl->>Dev: docker rm -f
+```
+
+Every step above is one HTTP call. The agent has no other way in: no socket, no host shell, no port that accepts unauthenticated calls.
+
+## Why split it this way
+
+| Problem | How it is handled |
 |---|---|
-| agent 拿到 docker socket 等於宿主 root | agent 永遠不掛 socket，只持 token |
-| repo 的 `devcontainer.json` 可能是攻擊面 | 不讀它。環境 100% 由 owner 寫的模板決定 |
-| agent 會加 `--privileged`／`--mount` | 它沒有入口：API 只收模板名 + task 名 + cmd 陣列 |
-| git 憑證被 devbox 逃逸偷走 | clone／push 由 controller 在宿主執行，devbox 內零憑證 |
-| devbox 反打 controller | devbox 雖在同一個 bridge，但沒有 token，API 一律 401；加上 controller 只操作帶 label 的容器 |
-| 沒有 network 分段怎麼辦 | Bearer token（`hmac.compare_digest`）＋ 只操作帶 `devbox.owner` label 的容器 |
-| 機器不能建 network | 全條路徑都不呼叫 `docker network create`；devbox 不傳 `--network` 就用內建 bridge |
+| A Docker socket in the agent equals host root | The agent never mounts a socket; it only holds a token |
+| `devcontainer.json` from a repo is an attack surface | It is never read. The environment is 100% decided by owner-written templates |
+| The agent wants `--privileged` / `--mount` | There is no entry point for it: the API accepts only a template name, a task name and a command array |
+| A devbox escape steals git credentials | Clone and push run on the host inside the controller. Devboxes contain zero credentials |
+| A devbox attacks the controller | No token means `401` on every route, and the controller only ever touches containers carrying its own `devbox.owner` label |
+| The machine cannot create Docker networks | No path calls `docker network create`; a devbox simply inherits the default bridge |
+| The agent must not choose its own image | Templates are read-only to the agent, pin `@sha256` digests, and are validated as whole files |
 
-## 部署（pi5）
+## Deploy (on the host)
 
 ```sh
-# 1. 取你的 uid/gid 與 docker 組 gid
+# 1. Note the uid, gid and the docker group gid
 id -u; id -g; ls -l /var/run/docker.sock
 
-# 2. 建工作目錄（controller 與 devbox 共用同一個宿主路徑）
-mkdir -p /storage/dca/work /storage/dca  && cd /storage/dca
+# 2. Create the work root (the same host path is bind-mounted into devboxes)
+mkdir -p /storage/dca/work && cd /storage/dca
 
-# 3. 解壓本包後
-cp .env.example .env && vi .env      # 填 DCA_TOKEN / DCA_HOST_WORK_ROOT / DOCKER_GID
+# 3. Unpack this repo, then
+cp .env.example .env && vi .env     # DCA_TOKEN, DCA_HOST_WORK_ROOT, DOCKER_GID
 
-# 4. 起 controller
+# 4. Start the controller
 docker compose -f compose.yml up -d --build
 docker compose -f compose.yml logs -f controller
 ```
 
-啟動日誌應見：`dca controller listening on 0.0.0.0:47123 (owner=agent, work_root=..., network=(docker default))`。
+The startup log should read:
 
-若之前跑過舊版（有 `dca-abnet`／`dca-c` 網絡），先清掉：
+```
+devbox controller listening on 0.0.0.0:47123 (owner=agent, work_root=..., network=(docker default))
+```
+
+On startup the controller also checks that `DCA_HOST_WORK_ROOT` is writable; if it is not, it exits with a plain-language error instead of failing later on the first request.
+
+If you ran an earlier build that created `dca-abnet` / `dca-c` networks, clean up once:
 
 ```sh
 docker compose -f compose.yml down
@@ -59,35 +105,36 @@ docker rm -f $(docker ps -aq --filter label=devbox.owner=agent) 2>/dev/null
 docker network rm dca-abnet dca-c 2>/dev/null
 ```
 
-## 自檢
+## Self-check
 
-controller 綁 loopback，從 agent 容器（host 網路）或臨時 host 網路容器測：
+From inside any bridge container (which is what the agent sees):
 
 ```sh
-cd /storage/dca/dca && source .env
-# 從任何 bridge 容器內：
 docker run --rm -e T="$DCA_TOKEN" curlimages/curl:latest \
   -s -H "Authorization: Bearer $T" http://172.17.0.1:47123/v1/health
+```
 
-# 從宿主（host 網絡）：
+From the host:
+
+```sh
 curl -s -H "Authorization: Bearer $DCA_TOKEN" http://127.0.0.1:47123/v1/health
 ```
 
-預期 200 加 JSON；去掉 header 應回 **401** —— 那才是 token 這層真的在運作。
+Expect `200` and JSON. **Drop the header and you must get `401`** — that is the proof the token layer is actually doing something.
 
-## 在 agent 容器裡怎麼用
+## Using it from the agent container
 
-把 `client/dc` 放進 agent 的 PATH（需要 python3），設兩個環境變數：
+Put `client/dc` on the agent's `PATH` (it needs `python3`) and set one variable:
 
 ```sh
-export DCA_TOKEN=<與 .env 相同>
-# DCA_URL 不用設：dc 會自己試 172.17.0.1 再試 127.0.0.1
-# 若宿主改過 docker bip，才需要 export DCA_URL=http://<你的網關>:47123
+export DCA_TOKEN=<same value as .env>
+# DCA_URL usually not needed: dc tries the local default gateway, then 127.0.0.1
+# If the host overrides the docker bip, export DCA_URL=http://<your gateway>:47123
 ```
 
 ```sh
-dc templates                      # 看有哪些模板可點
-dc new node22 task-001            # 起一個空的 devbox
+dc templates                      # list available templates
+dc new node22 task-001            # start an empty devbox
 dc exec task-001 -- git --version
 dc clone task-001 https://github.com/you/repo.git
 dc exec task-001 -- sh -lc 'cd repo && npm ci && npm test'
@@ -95,30 +142,30 @@ dc push task-001 repo
 dc rm task-001
 ```
 
-**`dc exec` 用 `sh -lc '...'` 包一層**：cmd 是字串陣列，不經宿主 shell。要讓 devbox 內 shell 解釋管道與 `&&`，就顯式叫 `sh -lc`。
+**Wrap composite commands in `sh -lc '...'`.** The command is passed as an argv array and never goes through a host shell, so pipes and `&&` only work if you explicitly ask a shell inside the devbox to interpret them.
 
-## 模板怎麼寫
+## Writing a template
 
-`templates/<name>.tpl`，每個欄位一行 `key: value`：
+One file per template at `templates/<name>.tpl`, one `key: value` per line:
 
 ```yaml
 name: node22
-image: node:22-alpine@sha256:1314fb30...   # 必須帶 digest
+image: node:22-alpine@sha256:1314fb30...   # digest is mandatory
 workdir: /workspace
-network: default      # default = 不傳 --network；none = 完全離網；其他 = 用已存在的網絡
+network: default      # default = inherit the default bridge; none = no network; other = an existing network name
 cpus: 2
 memory: 4g
 pids: 512
 user: "1000:1000"
 ```
 
-- 只允許上述 8 個欄位（另有 `notes`），出現其他欄位（例如 `privileged`）整份拒絕。
-- `image` 不帶 `@sha256:` 會被拒（除非 `DCA_ALLOW_TAGS=1`，不建議）。
-- 模板目錄以 `:ro` 掛進 controller；agent 看不到它，自然改不了。
+- Only those eight keys (plus `notes`) are accepted. Any other key, such as `privileged`, rejects the whole file.
+- `image` without `@sha256:` is rejected unless `DCA_ALLOW_TAGS=1`, which is not recommended.
+- The template directory is mounted `:ro` into the controller and is invisible to the agent, so the agent cannot edit it.
 
-## egress 收窄（可選，未內建）
+## Narrowing egress (optional, not built in)
 
-devbox 用 docker 內建 bridge，能出公網也能打 20.x 內網。要擋內網，在**宿主**加 nftables 規則（`apk add nftables`）：
+A devbox on the default bridge can reach the public internet and also the host's internal networks. To block the latter, add nftables rules **on the host** (`apk add nftables`):
 
 ```sh
 nft add table inet dca
@@ -127,42 +174,50 @@ nft add rule inet dca fwd iifname "docker0" ip daddr { 10.0.0.0/8, 192.168.0.0/1
 nft add rule inet dca fwd iifname "docker0" ip6 daddr { fc00::/7, fe80::/10, ::1/128 } counter drop
 ```
 
-devbox 仍需要出公網（clone、npm），所以只擋內網方向。若目標機連 nftables 都加不了，這一節做不到，見下面第 6 條。
+Devboxes still need the public internet for `git clone` and package installs, so only the internal direction is dropped. If the target machine cannot take nftables rules at all, this section is not available — see limit 6 below.
 
-## 運維
+## Configuration
 
-| 環境變數 | 預設 | 說明 |
+| Variable | Default | Meaning |
 |---|---|---|
-| `DCA_TOKEN` | 無（必填） | ≥16 字符，`openssl rand -hex 32` |
-| `DCA_HOST_WORK_ROOT` | 無（必填） | 宿主路徑，controller 內以同一路徑掛載 |
-| `DCA_BIND` | `0.0.0.0` | controller 綁定地址。要只給 host 網絡用就改 `127.0.0.1`，但 bridge 內的 agent 就連不上 |
-| `DCA_PORT` | `47123` | controller 監聽 port |
-| `DCA_NETWORK` | 空 | devbox 預設網絡；空或 `default` = 不傳 `--network` |
-| `DCA_OWNER` | `agent` | label，只操作此 label 的容器 |
-| `DCA_EXEC_TIMEOUT` | `900` | 單次 exec 上限（秒） |
-| `DCA_IDLE_HOURS` | `0` | >0 則定時 stop 閒置 task |
-| `DCA_ALLOW_TAGS` | `0` | 是否允許 image tag（不建議開） |
-| `DCA_ALLOW_PRIVATE_URL` | `0` | 是否允許 clone 內網 URL（不建議開） |
+| `DCA_TOKEN` | none (required) | Bearer token, at least 16 characters; generate with `openssl rand -hex 32` |
+| `DCA_HOST_WORK_ROOT` | none (required) | Host path, mounted into the controller under the identical path |
+| `DCA_BIND` | `0.0.0.0` | Controller bind address. `127.0.0.1` only works for host-network callers, so a bridge agent cannot connect |
+| `DCA_PORT` | `47123` | Controller listen port |
+| `DCA_NETWORK` | empty | Default devbox network; empty or `default` means no `--network` flag |
+| `DCA_OWNER` | `agent` | Container label the controller is allowed to manage |
+| `DCA_EXEC_TIMEOUT` | `900` | Per-exec timeout in seconds |
+| `DCA_IDLE_HOURS` | `0` | If > 0, periodically stop idle tasks |
+| `DCA_ALLOW_TAGS` | `0` | Allow image tags instead of digests (not recommended) |
+| `DCA_ALLOW_PRIVATE_URL` | `0` | Allow cloning private/internal URLs (not recommended) |
 
-## 已實測（本機，非 pi5）
+## What has been tested
 
-- 32 項單元測試全通過（模板越界、tag、`privileged` 欄位、路徑 `..`、URL 內網、task 注入、exec 字串注入）
-- 真實 HTTP：無 token 的 health 回 401；帶 token 的 templates／create 回 200／201
-- 實際送 docker 的 `run` 參數逐字檢視：無特權、無 socket、resources 齊全、預設不帶 `--network`
-- `py_compile` 通過
+Measured locally, against a fake docker shim and a live HTTP server:
 
-未驗證：controller image 在 pi5 上 build、`group_add` 拿到 socket、devbox 實際起得來、arm64 digest 拉得到。
+- 32 unit tests pass: template traversal, tag rejection, unknown/`privileged` keys, `..` in paths, internal URLs, task-name injection, exec string injection, network-field handling
+- Real HTTP: health without a token returns `401`; templates and create return `200` / `201`
+- The exact `docker run` argv was inspected line by line: no privileged flag, no socket, resource limits present, no `--network` by default
+- `py_compile` passes on both `app.py` and `dc`
 
-## 已知邊界（誠實清單）
+Measured against a real Pi 5 deployment:
 
-1. **devbox 逃逸仍是唯一大風險**：共享內核，需要真的 kernel／runc CVE；一旦成功就是 pi5 root（dockerd 是 root）。要收窄只能換 rootless dockerd。
-2. **controller 是新的信任根**：它被攻破等於宿主 root。它的 image 只有 python3 + docker-cli + git。
-3. **repo 的程式碼仍會被執行**（`npm ci`、`make`、`pytest`）：那是功能本身；影響範圍先在 devbox 內。
-4. **token 是唯一認證**（沒有 network 分段、controller 綁 `0.0.0.0`）：
-   - token 洩漏 = 可以建 devbox；
-   - `0.0.0.0` 代表 20.x 內網與 docker bridge 都能連到 47123，全靠 token 擋：token 要 32 bytes 以上、定期輪換；
-   - devbox 與 agent 同處默認 bridge，devbox 內的程式可以碰 agent 容器並嘗試偷 token —— 這是放棄 network 分段的直接代價，比 host 網絡方案差一級。
-5. **agent 若也能直接碰宿主 shell，整套失效**：agent 必須真的只有 HTTP 一條路。
-6. **無 network 分段 = 少了第二道牆**：token 洩了、或 controller 有 RCE，就沒有網絡層可以拖時間。這是「目標機不能建 network」換來的代價。
-7. **`172.17.0.1` 是默認 bridge 的網關**：若宿主 `daemon.json` 設過 `bip`／`default-address-pools`，或容器被接去自訂網絡，這個 IP 就不適用，要自行設 `DCA_URL`。
-8. **資源與回收未強制**：`DCA_IDLE_HOURS` 預設 0（不回收），長駐 devbox 會累積。
+- Controller image builds and starts; `401` without a token, `200` with one
+- `GET /v1/templates` returns all three templates with digests
+- The controller is reachable from a bridge container on a non-default bridge (`172.23.x`), confirming the gateway-probing logic rather than a hardcoded `172.17.0.1`
+
+Not yet verified: a devbox actually starting end to end on pi5, arm64 digest pulls, and `group_add` picking up the docker socket.
+
+## Known limits (honest list)
+
+1. **Devbox escape is the one big risk.** Shared kernel, so it takes a real kernel or runc CVE, but success means pi5 root, because dockerd runs as root. Only rootless dockerd narrows this.
+2. **The controller is a new trust root.** Compromising it is equivalent to host root. Its image carries only python3, docker-cli, git and openssh-client.
+3. **Repo code still executes** (`npm ci`, `make`, `pytest`). That is the product working as intended; the blast radius starts inside the devbox.
+4. **The token is the only authentication.** No network segmentation, and the controller binds `0.0.0.0`:
+   - a leaked token means anyone can create devboxes;
+   - `0.0.0.0` means both the internal network and every Docker bridge can reach `47123`, so the token is the only wall; use at least 32 bytes and rotate it;
+   - devboxes share the default bridge with the agent, so code inside a devbox can reach the agent container and try to steal its token. This is the direct cost of giving up network segmentation, and it is one grade weaker than a dedicated-network design.
+5. **If the agent also has a host shell, the whole design is void.** The agent must genuinely have only the HTTP path.
+6. **No segmentation means no second wall.** If the token leaks, or the controller has an RCE, there is no network layer left to buy time.
+7. **`172.17.0.1` is only the default-bridge gateway.** If the host sets `bip` or `default-address-pools` in `daemon.json`, or the container is attached to a custom network, set `DCA_URL` yourself.
+8. **Resource reclamation is not enforced.** `DCA_IDLE_HOURS` defaults to `0` (never reclaim), so long-lived devboxes accumulate.
