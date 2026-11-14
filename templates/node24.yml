@@ -1,0 +1,13 @@
+# node24 - Node.js 24 with npm
+# image pins an @sha256 digest; tags are rejected by the controller
+name: node24
+image: node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5
+workdir: /workspace
+network: default
+cpus: 2
+memory: 4g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git]
+notes: "Node.js 24 with npm"

@@ -1,0 +1,13 @@
+# swift - Swift 6.2 toolchain (Debian base); heavy image
+# image pins an @sha256 digest; tags are rejected by the controller
+name: swift
+image: swift:6.2@sha256:3459518b2e723a7c363d0f8cfa44fc796c77ecd8c18e92fd10e6f92dd78c0b12
+workdir: /workspace
+network: default
+cpus: 2
+memory: 6g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git]
+notes: "Swift 6.2 toolchain (Debian base); heavy image"

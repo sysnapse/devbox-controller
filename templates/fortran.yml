@@ -1,0 +1,13 @@
+# fortran - GFortran from the official GCC image (Debian base, gfortran already present)
+# image pins an @sha256 digest; tags are rejected by the controller
+name: fortran
+image: gcc:15@sha256:60a0af4b79226d7cb062cc18dcb56f91b4385aace8f6d514f114c3f1af363ef1
+workdir: /workspace
+network: default
+cpus: 2
+memory: 2g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git]
+notes: "GFortran from the official GCC image (Debian base, gfortran already present)"

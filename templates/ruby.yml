@@ -1,0 +1,13 @@
+# ruby - Ruby 3.4 with bundler; build-base for native gems
+# image pins an @sha256 digest; tags are rejected by the controller
+name: ruby
+image: ruby:3.4-alpine@sha256:68d60620b4458fc58c1e1d04a79ee26b85564fdd5387f3071ae077e2c56ae766
+workdir: /workspace
+network: default
+cpus: 2
+memory: 4g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git, build-base, yaml-dev]
+notes: "Ruby 3.4 with bundler; build-base for native gems"

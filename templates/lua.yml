@@ -1,0 +1,13 @@
+# lua - Lua 5.4; luarocks is not packaged for Alpine 3.21, install it with the agent if needed
+# image pins an @sha256 digest; tags are rejected by the controller
+name: lua
+image: alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab
+workdir: /workspace
+network: default
+cpus: 1
+memory: 1g
+pids: 256
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [lua5.4, git]
+notes: "Lua 5.4; luarocks is not packaged for Alpine 3.21, install it with the agent if needed"

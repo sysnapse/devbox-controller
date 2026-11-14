@@ -1,0 +1,13 @@
+# cpp - C++ toolchain: g++, make, cmake
+# image pins an @sha256 digest; tags are rejected by the controller
+name: cpp
+image: alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab
+workdir: /workspace
+network: default
+cpus: 2
+memory: 2g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [build-base, git, cmake]
+notes: "C++ toolchain: g++, make, cmake"

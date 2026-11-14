@@ -1,0 +1,13 @@
+# groovy - Groovy with the JDK 21 image underneath
+# image pins an @sha256 digest; tags are rejected by the controller
+name: groovy
+image: groovy:jdk21-noble@sha256:fa81cdb39e5418c234ee7c85c251274be021bec9fb439e374af4f0663b106a53
+workdir: /workspace
+network: default
+cpus: 2
+memory: 4g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git]
+notes: "Groovy with the JDK 21 image underneath"

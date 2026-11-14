@@ -1,5 +1,5 @@
-# base — minimal Alpine box for small scripts (L1)
-# image must carry an @sha256 digest; tags are rejected
+# base - minimal Alpine toolchain; use a language template for real work
+# image pins an @sha256 digest; tags are rejected by the controller
 name: base
 image: alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab
 workdir: /workspace
@@ -8,6 +8,6 @@ cpus: 1
 memory: 1g
 pids: 256
 user: "1000:1000"
-# Installed with apk at create time, so git clone/push works inside
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
 packages: [git]
-notes: "minimal toolchain; use node22/python312 for real workloads"
+notes: "minimal Alpine toolchain; use a language template for real work"

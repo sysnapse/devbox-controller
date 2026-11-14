@@ -1,0 +1,13 @@
+# java17 - JDK 17 with javac; Debian base because 17-jdk-alpine has no arm64 build
+# image pins an @sha256 digest; tags are rejected by the controller
+name: java17
+image: eclipse-temurin:17-jdk@sha256:5465815640e10433422217335e15a523a3e57021a1f2ae0fc3849380d237979f
+workdir: /workspace
+network: default
+cpus: 2
+memory: 4g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git]
+notes: "JDK 17 with javac; Debian base because 17-jdk-alpine has no arm64 build"

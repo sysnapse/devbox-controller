@@ -1,0 +1,13 @@
+# clojure - Clojure with the Clojure CLI and tools.deps
+# image pins an @sha256 digest; tags are rejected by the controller
+name: clojure
+image: clojure:temurin-25-tools-deps-bookworm-slim@sha256:58409dfeb25d0982fdd8bc037a012966ae1848fde51d4022676864dd47631837
+workdir: /workspace
+network: default
+cpus: 2
+memory: 4g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git]
+notes: "Clojure with the Clojure CLI and tools.deps"

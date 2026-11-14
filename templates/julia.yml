@@ -1,0 +1,13 @@
+# julia - Julia 1.12 with the package manager; heavy image
+# image pins an @sha256 digest; tags are rejected by the controller
+name: julia
+image: julia:1.12@sha256:a1fbd9d099a0517bdb70e7471955f09dc92beb822e7a5a74938f7ec8d5682693
+workdir: /workspace
+network: default
+cpus: 2
+memory: 6g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git]
+notes: "Julia 1.12 with the package manager; heavy image"

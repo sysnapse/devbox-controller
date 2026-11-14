@@ -1,0 +1,13 @@
+# php - PHP 8.5 CLI; composer is not an Alpine package, fetch it with the agent
+# image pins an @sha256 digest; tags are rejected by the controller
+name: php
+image: php:8.5-alpine@sha256:1ff5b45922ab30f418447c6089dbe2eba5f01e0b2742863d0327ac349305d70f
+workdir: /workspace
+network: default
+cpus: 2
+memory: 4g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git]
+notes: "PHP 8.5 CLI; composer is not an Alpine package, fetch it with the agent"

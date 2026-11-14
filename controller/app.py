@@ -63,7 +63,7 @@ INJECT_GIT = os.environ.get("DCA_INJECT_GIT", "1") == "1"
 BIND = os.environ.get("DCA_BIND", "0.0.0.0")
 PORT = int(os.environ.get("DCA_PORT", "47123"))
 
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")  # 1 char allowed: the C and R templates
 DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}$")
 NET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 PKG_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]{0,63}$")
@@ -279,8 +279,8 @@ GIT_CONFIG_TEMPLATE = """[user]
 \tdirectory = *
 """
 
-PKG_NOTE = ("template has no packages, so git is missing; add "
-            "packages: [git] to the template")
+PKG_NOTE = ("git is not installed inside this image; add packages: [git] "
+            "to the template (apk, apt-get and dnf are all supported)")
 
 
 def container_write(task, path, content, mode):
@@ -299,17 +299,42 @@ def container_has_git(task):
     return proc.returncode == 0 and bool(proc.stdout.strip())
 
 
+# Images differ: Alpine ships apk, Debian/Ubuntu ship apt-get, Fedora/RHEL ship dnf.
+# Detect once inside the container instead of making the template declare it.
+PKG_MANAGERS = ("apk", "apt-get", "dnf")
+
+
+def pkg_manager(task):
+    """Name of the package manager the image actually has, or "" if none."""
+    probe = " || ".join("command -v " + m for m in PKG_MANAGERS)
+    proc = subprocess.run([DOCKER, "exec", "-u", "0", cname(task), "sh", "-c", probe],
+                          capture_output=True, text=True, timeout=120)
+    found = os.path.basename((proc.stdout or "").strip().splitlines()[0]) if proc.stdout.strip() else ""
+    return found if found in PKG_MANAGERS else ""
+
+
 def install_packages(task, pkgs):
-    """apk add as root, so the template can ship git/curl without a custom image."""
+    """Install packages as root with whatever manager the image ships."""
     if not pkgs:
         return "none"
+    mgr = pkg_manager(task)
+    names = " ".join(pkgs)
+    if mgr == "apk":
+        script = "apk add --no-cache " + names
+    elif mgr == "apt-get":
+        script = ("apt-get update -qq && DEBIAN_FRONTEND=noninteractive "
+                  "apt-get install -y -qq --no-install-recommends " + names +
+                  " && rm -rf /var/lib/apt/lists/*")
+    elif mgr == "dnf":
+        script = "dnf install -y -q " + names + " && dnf clean all"
+    else:
+        return "failed: no package manager (apk/apt-get/dnf) in this image"
     proc = subprocess.run(
-        [DOCKER, "exec", "-u", "0", cname(task), "sh", "-c",
-         "apk add --no-cache " + " ".join(pkgs)],
-        capture_output=True, text=True, timeout=600)
+        [DOCKER, "exec", "-u", "0", cname(task), "sh", "-c", script],
+        capture_output=True, text=True, timeout=900)
     if proc.returncode != 0:
-        return "failed: " + (proc.stderr.strip() or proc.stdout.strip())[-400:]
-    return "ok"
+        return "failed (" + mgr + "): " + (proc.stderr.strip() or proc.stdout.strip())[-400:]
+    return "ok (" + mgr + ": " + names + ")"
 
 
 def configure_git(task, tpl):

@@ -1,7 +1,9 @@
 #!/bin/sh
-# 测试用假 docker：记录调用，回放预置输出。
-# 用法：FAKE_LOG=/tmp/x.log DCA_DOCKER=<此档> python3 tests/test_controller.py
+# Fake docker for the unit tests: records every call, replays canned output.
+#   FAKE_LOG=/tmp/x.log DCA_DOCKER=<this file> python3 tests/test_controller.py
+#   FAKE_PKG_MGR=apk|apt-get|dnf|none  picks what the "command -v" probe reports.
 echo "$@" >> "${FAKE_LOG:-/tmp/fake-docker.log}"
+ALL="$*"
 case "$1" in
   ps)
     printf '%s' "${FAKE_PS_OUT:-}"
@@ -10,7 +12,22 @@ case "$1" in
     echo "fakecontainerid1234"
     ;;
   exec)
-    echo "hello from exec"
+    case "$ALL" in
+      *"command -v apk"*)
+        case "${FAKE_PKG_MGR:-apk}" in
+          apk) echo "/sbin/apk" ;;
+          apt-get) echo "/usr/bin/apt-get" ;;
+          dnf) echo "/usr/bin/dnf" ;;
+          *) exit 1 ;;
+        esac
+        ;;
+      *"command -v git"*)
+        printf '%s' "${FAKE_HAS_GIT:-/usr/bin/git}"
+        ;;
+      *)
+        echo "hello from exec"
+        ;;
+    esac
     ;;
   stop|rm)
     ;;

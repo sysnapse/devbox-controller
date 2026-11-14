@@ -90,7 +90,8 @@ def main():
     check("gitconfig written", any("cat > /etc/gitconfig" in c for c in calls))
     check("token file written", any("cat > /etc/devbox-git-token" in c for c in calls))
     check("response reports git ok", res["git"] == "ok (identity + token)", res["git"])
-    check("response reports packages ok", res["packages"] == "ok", res["packages"])
+    check("response reports packages ok", str(res["packages"]).startswith("ok (apk:"),
+          res["packages"])
 
     print("DCA_INJECT_GIT=0 keeps the token on the controller side")
     mod2, tmp2, log2 = load(inject="0")

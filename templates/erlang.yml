@@ -1,0 +1,13 @@
+# erlang - Erlang/OTP 28 with rebar3
+# image pins an @sha256 digest; tags are rejected by the controller
+name: erlang
+image: erlang:28-alpine@sha256:a61e716415b2ec95369e3ba18ea59a4379a82ae7744f6045a4145297f5ca1521
+workdir: /workspace
+network: default
+cpus: 2
+memory: 4g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git, build-base]
+notes: "Erlang/OTP 28 with rebar3"

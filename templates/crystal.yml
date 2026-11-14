@@ -1,0 +1,13 @@
+# crystal - Crystal 1.22 with shards
+# image pins an @sha256 digest; tags are rejected by the controller
+name: crystal
+image: crystallang/crystal:1.22.3-alpine@sha256:450f111328d83be86117c96a795e3ebb1694f6249c45041f94e1a571ccf935ec
+workdir: /workspace
+network: default
+cpus: 2
+memory: 4g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git, build-base]
+notes: "Crystal 1.22 with shards"

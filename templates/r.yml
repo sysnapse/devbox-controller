@@ -1,0 +1,13 @@
+# r - R 4.5 with install.packages support
+# image pins an @sha256 digest; tags are rejected by the controller
+name: r
+image: r-base:4.5.2@sha256:c84d2d97cb9c4d895b219d83a5fd480302a6ad0d2fd449f3cda7978583909a02
+workdir: /workspace
+network: default
+cpus: 2
+memory: 4g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git]
+notes: "R 4.5 with install.packages support"

@@ -1,0 +1,13 @@
+# python311 - Python 3.11 with pip; build-base for C extensions
+# image pins an @sha256 digest; tags are rejected by the controller
+name: python311
+image: python:3.11-alpine@sha256:7fbad8e4652eae0186429a6f26cf5b23e27e8c6fd7ac4d0cfd7a6988cdeea1e1
+workdir: /workspace
+network: default
+cpus: 2
+memory: 4g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git, build-base]
+notes: "Python 3.11 with pip; build-base for C extensions"

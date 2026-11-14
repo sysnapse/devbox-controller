@@ -1,0 +1,13 @@
+# java25 - JDK 25 with javac
+# image pins an @sha256 digest; tags are rejected by the controller
+name: java25
+image: eclipse-temurin:25-jdk-alpine@sha256:c7c3d0bdf7f2bbc5a05a6712ed334d198360105634ea9adf76fca94f381b1e3f
+workdir: /workspace
+network: default
+cpus: 2
+memory: 4g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git]
+notes: "JDK 25 with javac"

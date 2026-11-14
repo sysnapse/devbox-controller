@@ -1,0 +1,13 @@
+# rust - rustc and cargo; build-base is needed to link musl targets
+# image pins an @sha256 digest; tags are rejected by the controller
+name: rust
+image: rust:1.100-alpine@sha256:de1e0058543a81ed7b046629167db587c67a94bdf37cce14eb27f0ec83baaffb
+workdir: /workspace
+network: default
+cpus: 2
+memory: 4g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git, build-base]
+notes: "rustc and cargo; build-base is needed to link musl targets"

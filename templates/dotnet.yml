@@ -1,0 +1,13 @@
+# dotnet - dotnet SDK 10 (C#, F#, VB); Debian base from mcr.microsoft.com
+# image pins an @sha256 digest; tags are rejected by the controller
+name: dotnet
+image: mcr.microsoft.com/dotnet/sdk:10.0@sha256:fe0fd4e93bd2fbb47c883b7a6369e5c8d3db8bf01cdc5981f6ee35fbdf3ff4fb
+workdir: /workspace
+network: default
+cpus: 2
+memory: 6g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git]
+notes: "dotnet SDK 10 (C#, F#, VB); Debian base from mcr.microsoft.com"

@@ -1,0 +1,13 @@
+# kotlin - JDK 21 base; no arm64 official Kotlin image exists, so install kotlinc inside
+# image pins an @sha256 digest; tags are rejected by the controller
+name: kotlin
+image: eclipse-temurin:21-jdk-alpine@sha256:82801f9dcdcbad5a05082aba8c86d1da5b72ccb498e71318b1f91b5a477887b3
+workdir: /workspace
+network: default
+cpus: 2
+memory: 4g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git]
+notes: "JDK 21 base; no arm64 official Kotlin image exists, so install kotlinc inside"

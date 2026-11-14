@@ -1,0 +1,13 @@
+# haskell - GHC 9.12 with cabal and stack; heavy image, pull only when needed
+# image pins an @sha256 digest; tags are rejected by the controller
+name: haskell
+image: haskell:9.12@sha256:2edfc7916bf5a65771fbaf1bfea45bddd64185d20826003c054b9c458e362d47
+workdir: /workspace
+network: default
+cpus: 2
+memory: 6g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git]
+notes: "GHC 9.12 with cabal and stack; heavy image, pull only when needed"

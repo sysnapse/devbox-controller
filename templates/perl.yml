@@ -1,0 +1,13 @@
+# perl - Perl 5.42 with cpan; build-essential for XS modules
+# image pins an @sha256 digest; tags are rejected by the controller
+name: perl
+image: perl:5.42-slim@sha256:892cac741cbcd1850c73fdcc3150d0ed3e1ba8a32dbef2fb5ac96c9cb2bddc1a
+workdir: /workspace
+network: default
+cpus: 2
+memory: 2g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git, build-essential]
+notes: "Perl 5.42 with cpan; build-essential for XS modules"

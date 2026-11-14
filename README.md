@@ -167,6 +167,106 @@ dc rm task-001
 
 **Wrap composite commands in `sh -lc '...'`.** The command is passed as an argv array and never goes through a host shell, so pipes and `&&` only work if you explicitly ask a shell inside the devbox to interpret them.
 
+## Templates shipped
+
+34 templates cover the mainstream languages. Every one of them is checked at
+render time with `tools/update-templates.py`, which resolves the image against its
+registry, pins the digest, and refuses any image with no `linux/arm64` manifest,
+because the devbox host is a Pi 5. `lua`, `kotlin`, `scala` and `zig` have no
+usable arm64 official image, so they are handled differently (see the notes below
+the table).
+
+| template | image | limits | packages installed at create | notes |
+|---|---|---|---|---|
+| `base` | `alpine:3.21` | 1 cpu / 1g | git | minimal Alpine toolchain; use a language template for real work |
+| `bun` | `oven/bun:1-alpine` | 2 cpu / 2g | git | Bun runtime and package manager |
+| `c` | `alpine:3.21` | 2 cpu / 2g | build-base, git, cmake, cmocka-dev | C toolchain: gcc, make, cmake, cmocka |
+| `clojure` | `clojure:temurin-25-tools-deps-bookworm-slim` | 2 cpu / 4g | git | Clojure with the Clojure CLI and tools.deps |
+| `cpp` | `alpine:3.21` | 2 cpu / 2g | build-base, git, cmake | C++ toolchain: g++, make, cmake |
+| `crystal` | `crystallang/crystal:1.22.3-alpine` | 2 cpu / 4g | git, build-base | Crystal 1.22 with shards |
+| `dart` | `dart:stable` | 2 cpu / 4g | git | Dart SDK with pub |
+| `deno` | `denoland/deno:alpine` | 2 cpu / 2g | git | Deno runtime (TypeScript out of the box) |
+| `dotnet` | `mcr.microsoft.com/dotnet/sdk:10.0` | 2 cpu / 6g | git | dotnet SDK 10 (C#, F#, VB); Debian base from mcr.microsoft.com |
+| `elixir` | `elixir:1.20-alpine` | 2 cpu / 4g | git, build-base | Elixir with mix and iex; build-base for NIFs |
+| `erlang` | `erlang:28-alpine` | 2 cpu / 4g | git, build-base | Erlang/OTP 28 with rebar3 |
+| `fortran` | `gcc:15` | 2 cpu / 2g | git | GFortran from the official GCC image (Debian base, gfortran already present) |
+| `go` | `golang:1.27-alpine` | 2 cpu / 4g | git, make | Go toolchain; the image already carries git |
+| `groovy` | `groovy:jdk21-noble` | 2 cpu / 4g | git | Groovy with the JDK 21 image underneath |
+| `haskell` | `haskell:9.12` | 2 cpu / 6g | git | GHC 9.12 with cabal and stack; heavy image, pull only when needed |
+| `java17` | `eclipse-temurin:17-jdk` | 2 cpu / 4g | git | JDK 17 with javac; Debian base because 17-jdk-alpine has no arm64 build |
+| `java21` | `eclipse-temurin:21-jdk-alpine` | 2 cpu / 4g | git | JDK 21 with javac |
+| `java25` | `eclipse-temurin:25-jdk-alpine` | 2 cpu / 4g | git | JDK 25 with javac |
+| `julia` | `julia:1.12` | 2 cpu / 6g | git | Julia 1.12 with the package manager; heavy image |
+| `kotlin` | `eclipse-temurin:21-jdk-alpine` | 2 cpu / 4g | git | JDK 21 base; no arm64 official Kotlin image exists, so install kotlinc inside |
+| `lua` | `alpine:3.21` | 1 cpu / 1g | lua5.4, git | Lua 5.4; luarocks is not packaged for Alpine 3.21, install it with the agent if needed |
+| `nim` | `nimlang/nim:2.2.0` | 2 cpu / 2g | git | Nim 2.2 with nimble (2.4.0 is amd64-only, so 2.2.0 is pinned) |
+| `node22` | `node:22-alpine` | 2 cpu / 4g | git | Node.js 22 LTS with npm; git is already in the image |
+| `node24` | `node:24-alpine` | 2 cpu / 4g | git | Node.js 24 with npm |
+| `ocaml` | `ocaml/opam:debian-12-ocaml-5.3` | 2 cpu / 4g | git | OCaml 5.3 with opam and dune |
+| `perl` | `perl:5.42-slim` | 2 cpu / 2g | git, build-essential | Perl 5.42 with cpan; build-essential for XS modules |
+| `php` | `php:8.5-alpine` | 2 cpu / 4g | git | PHP 8.5 CLI; composer is not an Alpine package, fetch it with the agent |
+| `python311` | `python:3.11-alpine` | 2 cpu / 4g | git, build-base | Python 3.11 with pip; build-base for C extensions |
+| `python312` | `python:3.12-alpine` | 2 cpu / 4g | git, build-base | Python 3.12 with pip; build-base for C extensions |
+| `python313` | `python:3.13-alpine` | 2 cpu / 4g | git, build-base | Python 3.13 with pip; build-base for C extensions |
+| `r` | `r-base:4.5.2` | 2 cpu / 4g | git | R 4.5 with install.packages support |
+| `ruby` | `ruby:3.4-alpine` | 2 cpu / 4g | git, build-base, yaml-dev | Ruby 3.4 with bundler; build-base for native gems |
+| `rust` | `rust:1.100-alpine` | 2 cpu / 4g | git, build-base | rustc and cargo; build-base is needed to link musl targets |
+| `swift` | `swift:6.2` | 2 cpu / 6g | git | Swift 6.2 toolchain (Debian base); heavy image |
+
+Pick a template by language, not by version, unless you need a specific one:
+`node22` and `node24` both exist, as do `python311`, `python312` and `python313`,
+`java17`, `java21` and `java25`.
+
+### Adding or refreshing one
+
+The table in `tools/update-templates.py` is the only place that needs editing:
+
+```sh
+# resolve every image, verify arm64, write templates/*.yml
+python3 tools/update-templates.py
+
+# same, but write nothing (use this in CI or before a commit)
+python3 tools/update-templates.py --check
+
+# one template
+python3 tools/update-templates.py --only rust
+```
+
+Each run resolves the digest live, so refreshing a language is a version bump plus
+a rerun. `tools/pin-images.py <ref>` prints the digest and platforms for any image;
+`tools/image-config.py <ref>` prints its ENTRYPOINT, USER and WORKDIR, which tells
+you whether `sleep infinity` will start it (`docker run` only overrides CMD).
+
+### Languages without an arm64 official image
+
+| language | status | what this repo does instead |
+|---|---|---|
+| Kotlin | no official image at all | `kotlin` template is the JDK 21 base; install `kotlinc` inside |
+| Scala | no official image at all | use `java21`, install `scala-cli` or `sbt` inside |
+| Zig | no Docker Hub repo (`ghcr.io/ziglang/zig` needs auth, unverified) | use `base`/`c` and download the tarball inside |
+| Lua | `library/lua` returns 401 (removed) and `luarocks` is not packaged for Alpine 3.21 | `lua` template is `alpine` + `lua5.4` |
+| Nim | 2.4.0 is amd64-only | pinned to 2.2.0, the newest arm64 tag |
+| Java 17 | `17-jdk-alpine` has no arm64 build | `java17` uses the Debian `17-jdk` variant |
+| Crystal | `1.14-alpine` is amd64-only | pinned to `1.22.3-alpine`, which is arm64 |
+
+### Disk cost (read this before creating one of everything)
+
+Images are pulled the first time a template is used, not when the file is added, so
+having 34 templates costs nothing until you `dc new` into them. But the heavy ones
+are heavy: `swift`, `haskell`, `dotnet` and `julia` are multi-GB each, and the whole
+set is roughly 15-20 GB.
+
+On the Pi 5 the docker data-root sits on the SD card, so pulling all of them wears
+the card and can fill it. Create only what you need, and remove images with:
+
+```sh
+docker image ls --filter label=devbox --format '{{.Repository}}:{{.Tag}} {{.Size}}'
+docker image rm <image>            # per image
+docker image prune -a              # every image no container uses, ask first
+```
+
+`dc rm <task>` removes the container; it does not remove the image.
+
 ## Writing a template
 
 One file per template at `templates/<name>.yml` — plain YAML, parsed with `yaml.safe_load`, not a custom format:

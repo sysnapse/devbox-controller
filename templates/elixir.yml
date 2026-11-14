@@ -1,0 +1,13 @@
+# elixir - Elixir with mix and iex; build-base for NIFs
+# image pins an @sha256 digest; tags are rejected by the controller
+name: elixir
+image: elixir:1.20-alpine@sha256:a2f0fe1bfd8a2f9cc91d913f4a12e6430e27e618720f753a514e2fff3d35f5a7
+workdir: /workspace
+network: default
+cpus: 2
+memory: 4g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git, build-base]
+notes: "Elixir with mix and iex; build-base for NIFs"

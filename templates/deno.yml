@@ -1,0 +1,13 @@
+# deno - Deno runtime (TypeScript out of the box)
+# image pins an @sha256 digest; tags are rejected by the controller
+name: deno
+image: denoland/deno:alpine@sha256:75749604f68aea01d39bead15fd1c86343639e44eb8c58ab051da8a924799d01
+workdir: /workspace
+network: default
+cpus: 2
+memory: 2g
+pids: 512
+user: "1000:1000"
+# Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
+packages: [git]
+notes: "Deno runtime (TypeScript out of the box)"
