@@ -138,6 +138,24 @@ def main():
     check("push on a non-repo gives a clear error",
           rc == 1 and "not a git repository" in out, (out or err)[:160])
 
+    print("== git inside the devbox")
+    rc, out, err = dc("exec", task, "--", "sh", "-lc", "git --version")
+    check("git is installed (template packages)", rc == 0 and "git version" in out,
+          (out or err)[:160])
+    rc, out, err = dc("exec", task, "--", "sh", "-lc",
+                      "git config --get user.email; git config --get credential.helper")
+    check("identity and helper configured", "@" in out and "credential-devbox" in out,
+          out.replace(chr(10), " / ")[:160])
+    rc, out, err = dc("exec", task, "--", "sh", "-lc",
+                      "test -r /etc/devbox-git-token && echo readable")
+    check("token file readable by the devbox user", "readable" in out, (out or err)[:120])
+    rc, out, err = dc("exec", task, "--", "sh", "-lc",
+                      "git clone --depth 1 -q https://github.com/sysnapse/devbox-controller /workspace/dc && echo cloned")
+    check("git clone works inside the devbox", "cloned" in out, (out or err)[:200])
+    rc, out, err = dc("exec", task, "--", "sh", "-lc",
+                      "cd /workspace/dc && git checkout -q -b probe && git commit -q --allow-empty -m probe && git log --oneline -1")
+    check("git commit works inside the devbox", rc == 0 and "probe" in out, (out or err)[:200])
+
     print("== cleanup")
     rc, out, err = dc("rm", task)
     check("dc rm rc=0", rc == 0, (out or err)[:200])
