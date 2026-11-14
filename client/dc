@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""
+dc —— agent 侧客户端（架构中的 A 里跑的 shell 入口）。
+
+零依赖，只用标准库。所有动作都是「点名模板 + 传最小参数」，
+没有任何参数可以变成 docker flag。
+
+用法：
+  dc health
+  dc templates
+  dc tasks
+  dc new <template> <task>
+  dc exec <task> -- <cmd> [args...]
+  dc clone <task> <url> [dir]
+  dc push <task> [dir]
+  dc stop <task>
+  dc rm <task>
+
+环境变量：
+  DCA_URL    不设就自动探测：http://<本机默认网关>:47123 → http://172.17.0.1:47123
+             → http://127.0.0.1:47123（host 网络时用）
+  DCA_PORT   默认 47123，用于拼探测地址
+  DCA_TOKEN  必填
+"""
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+PORT = os.environ.get("DCA_PORT", "47123")
+
+
+def default_gateway():
+    """读出本容器所在的网关（宿主）。不写死 172.17.0.1：agent 可能跑在自建 bridge 上。"""
+    try:
+        with open("/proc/net/route", encoding="utf-8") as fh:
+            for line in fh.readlines()[1:]:
+                fields = line.split()
+                if len(fields) > 2 and fields[1] == "00000000":
+                    raw = int(fields[2], 16)
+                    return "%d.%d.%d.%d" % (raw & 255, (raw >> 8) & 255,
+                                            (raw >> 16) & 255, (raw >> 24) & 255)
+    except OSError:
+        pass
+    return ""
+
+
+# 探测顺序：真实默认网关（本机实际所在 bridge 的宿主）→ 172.17.0.1（docker0 惯例）→ loopback
+CANDIDATES = [
+    os.environ.get("DCA_URL", "").rstrip("/"),
+    ("http://" + default_gateway() + ":" + PORT) if default_gateway() else "",
+    "http://172.17.0.1:" + PORT,
+    "http://127.0.0.1:" + PORT,
+]
+TOKEN = os.environ.get("DCA_TOKEN", "")
+URL = None
+
+USAGE = __doc__.strip()
+
+
+def resolve():
+    """从候选地址里找第一个回应 health 的。"""
+    global URL
+    if URL:
+        return URL
+    errs = []
+    seen = set()
+    for cand in CANDIDATES:
+        if not cand or cand in seen:
+            continue
+        seen.add(cand)
+        try:
+            req = urllib.request.Request(cand + "/v1/health",
+                                         headers={"Authorization": "Bearer " + TOKEN}, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    URL = cand
+                    return URL
+                errs.append("%s -> HTTP %s" % (cand, resp.status))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                die("controller 有回应（%s）但 token 不对：HTTP 401" % cand)
+            errs.append("%s -> HTTP %s" % (cand, exc.code))
+        except Exception as exc:  # noqa: BLE001
+            errs.append("%s -> %s" % (cand, exc))
+    die("找不到 controller，已试：" + "；".join(errs) + "。可用 DCA_URL 指定")
+
+
+def call(method, path, payload=None, timeout=960):
+    if not TOKEN:
+        die("DCA_TOKEN 未设置")
+    base = resolve()
+    data = None
+    headers = {"Authorization": "Bearer " + TOKEN}
+    if payload is not None:
+        data = json.dumps(payload).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read() or b"{}")
+        except Exception:  # noqa: BLE001
+            body = {"error": str(exc)}
+        return exc.code, body
+    except urllib.error.URLError as exc:
+        die("连不上 controller（%s）：%s" % (base, exc.reason))
+
+
+def die(msg):
+    print("dc: " + msg, file=sys.stderr)
+    sys.exit(2)
+
+
+def need(args, n, usage):
+    if len(args) < n:
+        die("参数不足。用法：" + usage)
+
+
+def main(argv):
+    if len(argv) < 2:
+        print(USAGE)
+        return 2
+    cmd, args = argv[1], argv[2:]
+
+    if cmd in ("-h", "--help", "help"):
+        print(USAGE)
+        return 0
+
+    if cmd == "health":
+        code, body = call("GET", "/v1/health")
+        print(json.dumps(body, ensure_ascii=False, indent=2))
+        return 0 if code == 200 else 1
+
+    if cmd == "templates":
+        code, body = call("GET", "/v1/templates")
+        if code != 200:
+            print(json.dumps(body, ensure_ascii=False))
+            return 1
+        for t in body.get("templates", []):
+            if "error" in t:
+                print("%-16s  [坏模板] %s" % (t.get("name", "?"), t["error"]))
+            else:
+                print("%-16s %-12s cpu=%-3s mem=%-5s net=%s" % (
+                    t["name"], (t["image"].split("@")[0])[-24:], t["cpus"], t["memory"], t["network"]))
+        return 0
+
+    if cmd == "tasks":
+        code, body = call("GET", "/v1/tasks")
+        if code != 200:
+            print(json.dumps(body, ensure_ascii=False))
+            return 1
+        rows = body.get("tasks", [])
+        if not rows:
+            print("(无任务)")
+        for r in rows:
+            print("%-24s %-16s %s" % (r["task"], r["template"], r["status"]))
+        return 0
+
+    if cmd == "new":
+        need(args, 2, "dc new <template> <task>")
+        code, body = call("POST", "/v1/tasks", {"template": args[0], "task": args[1]})
+        print(json.dumps(body, ensure_ascii=False, indent=2))
+        return 0 if code < 400 else 1
+
+    if cmd == "exec":
+        need(args, 3, "dc exec <task> -- <cmd> [args...]")
+        task = args[0]
+        rest = args[1:]
+        if rest and rest[0] == "--":
+            rest = rest[1:]
+        if not rest:
+            die("缺少要执行的命令")
+        code, body = call("POST", "/v1/tasks/%s/exec" % task, {"cmd": rest})
+        if code >= 400:
+            print("dc: " + body.get("error", "error"), file=sys.stderr)
+            return 1
+        sys.stdout.write(body.get("stdout", ""))
+        sys.stderr.write(body.get("stderr", ""))
+        return int(body.get("rc", 0))
+
+    if cmd == "clone":
+        need(args, 2, "dc clone <task> <url> [dir]")
+        payload = {"url": args[1]}
+        if len(args) > 2:
+            payload["dir"] = args[2]
+        code, body = call("POST", "/v1/tasks/%s/clone" % args[0], payload)
+        print(json.dumps(body, ensure_ascii=False, indent=2))
+        return 0 if code < 400 else 1
+
+    if cmd == "push":
+        need(args, 1, "dc push <task> [dir]")
+        payload = {}
+        if len(args) > 1:
+            payload["dir"] = args[1]
+        code, body = call("POST", "/v1/tasks/%s/push" % args[0], payload)
+        print(json.dumps(body, ensure_ascii=False, indent=2))
+        return 0 if code < 400 else 1
+
+    if cmd == "stop":
+        need(args, 1, "dc stop <task>")
+        code, body = call("POST", "/v1/tasks/%s/stop" % args[0], {})
+        print(json.dumps(body, ensure_ascii=False))
+        return 0 if code < 400 else 1
+
+    if cmd == "rm":
+        need(args, 1, "dc rm <task>")
+        code, body = call("DELETE", "/v1/tasks/%s" % args[0])
+        print(json.dumps(body, ensure_ascii=False))
+        return 0 if code < 400 else 1
+
+    die("未知子命令：" + cmd)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

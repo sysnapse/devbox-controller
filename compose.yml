@@ -1,0 +1,67 @@
+# dca —— controller + agent 参考部署（不需要 docker network create）
+#
+# 三个角色（人类可读）：
+#   controller：唯一挂 /var/run/docker.sock 的容器，跑 app.py，负责建环境
+#   agent     ：你的 agent 容器，只拿到 DCA_URL + DCA_TOKEN，没有 socket
+#   devbox    ：由 controller 用模板动态 docker run 出来，不在本文件内
+#
+# 容器命名：devbox-controller（controller）、devbox-<task>（devbox）
+#
+# 认证方式：只用 Bearer token（network 分段已放弃，因为目标机不能建 docker network）
+#   * controller 用 network_mode: host，监听 0.0.0.0:47123（靠 token 认证）
+#   * agent 用默认 bridge 即可，經 docker0 網關呼叫 http://172.17.0.1:47123
+#   * agent 若在 host 网络，用 http://127.0.0.1:47123（dc 會自動探测两者）
+#   * devbox 用 docker 默認 bridge（不传 --network），打不到宿主 loopback
+#
+# devbox 的出网由模板 network 字段决定（默认 default = 不传 --network）；
+# 要挡内网请在宿主加 nftables 规则（见 README「egress 收窄」）。
+
+services:
+  controller:
+    build: ./controller
+    image: devbox-controller:local
+    container_name: devbox-controller
+    restart: unless-stopped
+    # 不建任何自定义网络：直接共享宿主网络栈，由 app.py 自己绑 127.0.0.1
+    network_mode: host
+    environment:
+      DCA_TOKEN: "${DCA_TOKEN:?请在 .env 设置 DCA_TOKEN（>=16 字符）}"
+      DCA_TEMPLATES_DIR: /templates
+      DCA_WORK_ROOT: "${DCA_HOST_WORK_ROOT:?请在 .env 设置 DCA_HOST_WORK_ROOT}"
+      DCA_BIND: "${DCA_BIND:-0.0.0.0}"
+      DCA_PORT: "${DCA_PORT:-47123}"
+      # 空 = devbox 不传 --network（用 docker 默认 bridge），不需要 create network
+      DCA_NETWORK: "${DCA_NETWORK:-}"
+      DCA_OWNER: "${DCA_OWNER:-agent}"
+      DCA_EXEC_TIMEOUT: "${DCA_EXEC_TIMEOUT:-900}"
+      DCA_IDLE_HOURS: "${DCA_IDLE_HOURS:-0}"
+      DCA_ALLOW_TAGS: "${DCA_ALLOW_TAGS:-0}"
+      DCA_ALLOW_PRIVATE_URL: "${DCA_ALLOW_PRIVATE_URL:-0}"
+      GIT_TERMINAL_PROMPT: "0"
+    volumes:
+      # 必须与 DCA_HOST_WORK_ROOT 同一路径，否则 docker 会把 bind mount 解析到空目录
+      - "${DCA_HOST_WORK_ROOT}:${DCA_HOST_WORK_ROOT}"
+      - ./templates:/templates:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /home/dca/.ssh:mode=0700
+    # 组 ID 要让 dca 用户能读写 socket：宿主 docker 组的 gid
+    group_add:
+      - "${DOCKER_GID:?请在 .env 设置 DOCKER_GID（ls -l /var/run/docker.sock）}"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # agent 的示例占位：实际用你现有的 agent 容器
+  # 关键：agent 用默认 bridge 就在；不设 DCA_URL 时 dc 会自动探测 172.17.0.1。
+  # agent:
+  #   image: <你的 agent image>
+  #   environment:
+  #     DCA_PORT: 47123
+  #     DCA_TOKEN: ${DCA_TOKEN}

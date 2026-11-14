@@ -1,0 +1,20 @@
+#!/bin/sh
+# 测试用假 docker：记录调用，回放预置输出。
+# 用法：FAKE_LOG=/tmp/x.log DCA_DOCKER=<此档> python3 tests/test_controller.py
+echo "$@" >> "${FAKE_LOG:-/tmp/fake-docker.log}"
+case "$1" in
+  ps)
+    printf '%s' "${FAKE_PS_OUT:-}"
+    ;;
+  run)
+    echo "fakecontainerid1234"
+    ;;
+  exec)
+    echo "hello from exec"
+    ;;
+  stop|rm)
+    ;;
+  *)
+    ;;
+esac
+exit "${FAKE_RC:-0}"
