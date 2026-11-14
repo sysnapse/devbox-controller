@@ -28,8 +28,8 @@ empty = tmp / "mount"
 empty.mkdir()
 builtin = tmp / "builtin"
 builtin.mkdir()
-(builtin / "node22.tpl").write_text("name: node22\nimage: alpine@sha256:" + "a" * 64 + "\n")
-(empty / "override.tpl").write_text("name: override\nimage: alpine@sha256:" + "b" * 64 + "\n")
+(builtin / "node22.yml").write_text("name: node22\nimage: alpine@sha256:" + "a" * 64 + "\n")
+(empty / "override.yml").write_text("name: override\nimage: alpine@sha256:" + "b" * 64 + "\n")
 
 os.environ.update({
     "DCA_TOKEN": "t" * 32,

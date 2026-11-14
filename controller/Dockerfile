@@ -1,7 +1,7 @@
 FROM alpine:3.21
 
-# 只装必要件：python3 跑 controller、docker-cli 操作 socket、git 做 clone/push
-RUN apk add --no-cache python3 docker-cli git openssh-client ca-certificates tzdata \
+# 只装必要件：python3 + py3-yaml 解析模板、docker-cli 操作 socket、git 做 clone/push
+RUN apk add --no-cache python3 py3-yaml docker-cli git openssh-client ca-certificates tzdata \
  && update-ca-certificates
 
 ARG DCA_UID=1000

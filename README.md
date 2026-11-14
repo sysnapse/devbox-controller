@@ -169,7 +169,7 @@ dc rm task-001
 
 ## Writing a template
 
-One file per template at `templates/<name>.tpl`, one `key: value` per line:
+One file per template at `templates/<name>.yml` — plain YAML, parsed with `yaml.safe_load`, not a custom format:
 
 ```yaml
 name: node22
@@ -183,16 +183,18 @@ user: "1000:1000"
 ```
 
 - Only those eight keys (plus `notes`) are accepted. Any other key, such as `privileged`, rejects the whole file.
+- Values must be scalars (string, integer or float). Nested mappings, lists and booleans are rejected, so `user: true` cannot be silently read as the string `true`.
 - `image` without `@sha256:` is rejected unless `DCA_ALLOW_TAGS=1`, which is not recommended.
 - The template directory is mounted `:ro` into the controller and is invisible to the agent, so the agent cannot edit it.
+- Legacy `*.tpl` files are still read during migration; when both `foo.yml` and `foo.tpl` exist, `foo.yml` wins. New templates should be `.yml` only.
 
 ### Built-in copies (why the API is never template-less)
 
 The image also carries a copy of `templates/` at `/opt/templates`. Resolution order is the mounted directory first, then the built-in copy. This exists because of a real failure: if `docker compose` is started from a directory where `./templates` does not exist, Docker creates an *empty* directory for the bind mount, the controller then reports `[]` templates, and every `dc new` fails with `template 不存在`.
 
-The build context is therefore the repository root (`context: .`, `dockerfile: controller/Dockerfile`), not `./controller`. If you edit `templates/*.tpl`, rebuild with `docker compose up -d --build`; a plain restart will not refresh the built-in copies.
+The build context is therefore the repository root (`context: .`, `dockerfile: controller/Dockerfile`), not `./controller`. If you edit `templates/*.yml`, rebuild with `docker compose up -d --build`; a plain restart will not refresh the built-in copies.
 
-`templates/base.tpl` is the only template that should ever need editing for local mirrors; keep the digest lines intact.
+`templates/base.yml` is the only template that should ever need editing for local mirrors; keep the digest lines intact.
 
 ## Narrowing egress (optional, not built in)
 

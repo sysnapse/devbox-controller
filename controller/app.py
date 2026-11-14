@@ -7,9 +7,9 @@ devbox（被建出来的开发环境容器）。
 
 设计要点：
   * agent 只能经 HTTP + Bearer token 呼叫本 API，拿不到 socket。
-  * 模板由 owner 写死在 /templates，agent 只能点名，不能传任何 docker flag。
+  * 模板由 owner 写死在 /templates（标准 YAML，*.yml），agent 只能点名，不能传任何 docker flag。
   * 所有容器带 label devbox.task / devbox.owner，只操作带该 label 的容器。
-  * 只依赖 Python 标准库 + docker CLI，无第三方套件。
+  * 只依赖 Python 标准库 + PyYAML + docker CLI，无其他第三方套件。
 """
 
 import hmac
@@ -24,6 +24,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
+
+import yaml
 
 # ---------------------------------------------------------------- 配置
 
@@ -62,6 +64,9 @@ class Bad(Exception):
 # ---------------------------------------------------------------- 模板
 
 TPL_KEYS = {"name", "image", "workdir", "network", "cpus", "memory", "pids", "user", "notes"}
+# 模板就是普通 YAML 檔（templates/<name>.yml）。舊的 *.tpl 在升級期間仍然接受，
+# 同名時 .yml 優先，方便 owner 逐步改名而不用停機。
+TPL_EXTS = (".yml", ".tpl")
 
 
 def template_dirs():
@@ -73,15 +78,33 @@ def template_dirs():
     return out
 
 
+def template_stems(d):
+    """目录内的模板名 -> 副档名；同名时 .yml 优先于 .tpl。"""
+    out = {}
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return out
+    for fn in names:
+        for ext in TPL_EXTS:
+            if fn.endswith(ext):
+                stem = fn[: -len(ext)]
+                if stem not in out or ext == ".yml":
+                    out[stem] = ext
+                break
+    return out
+
+
 def find_template_file(name):
-    """在模板目录里找 <name>.tpl，先挂载后内置；路径越界一律拒绝。"""
+    """找 <name>.yml（或旧 <name>.tpl），先挂载后内置；路径越界一律拒绝。"""
     for d in template_dirs():
         root = os.path.realpath(d)
-        real = os.path.realpath(os.path.join(d, name + ".tpl"))
-        if not real.startswith(root + os.sep):
-            raise Bad("template 路径越界")
-        if os.path.isfile(real):
-            return real
+        for ext in TPL_EXTS:
+            real = os.path.realpath(os.path.join(d, name + ext))
+            if not real.startswith(root + os.sep):
+                raise Bad("template 路径越界")
+            if os.path.isfile(real):
+                return real
     return None
 
 
@@ -91,20 +114,22 @@ def load_template(name):
     real = find_template_file(name)
     if not real:
         raise Bad("template 不存在：" + name)
+    try:
+        with open(real, "r", encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh)
+    except yaml.YAMLError as exc:
+        raise Bad("template YAML 解析失败：%s（%s）" % (name, exc))
+    except OSError as exc:
+        raise Bad("template 读取失败：%s（%s）" % (name, exc))
+    if not isinstance(doc, dict):
+        raise Bad("template 必须是 YAML mapping：" + name)
     tpl = {}
-    with open(real, "r", encoding="utf-8") as fh:
-        for raw in fh:
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if ":" not in line:
-                raise Bad("template 格式错误：" + name)
-            k, v = line.split(":", 1)
-            k = k.strip()
-            v = v.strip().strip('"').strip("'")
-            if k not in TPL_KEYS:
-                raise Bad("template 含有未知字段：" + k)
-            tpl[k] = v
+    for key, val in doc.items():
+        if key not in TPL_KEYS:
+            raise Bad("template 含有未知字段：" + str(key))
+        if isinstance(val, bool) or not isinstance(val, (str, int, float)):
+            raise Bad("template 字段必须是纯量：" + str(key))
+        tpl[str(key)] = str(val).strip()
     for req in ("image",):
         if not tpl.get(req):
             raise Bad("template 缺少必填字段：" + req)
@@ -131,18 +156,14 @@ def list_templates():
     out = []
     seen = set()
     for d in template_dirs():
-        try:
-            names = sorted(os.listdir(d))
-        except OSError:
-            continue
-        for fn in names:
-            if not fn.endswith(".tpl") or fn[:-4] in seen:
+        for stem in sorted(template_stems(d)):
+            if stem in seen:
                 continue
-            seen.add(fn[:-4])
+            seen.add(stem)
             try:
-                out.append(load_template(fn[:-4]))
+                out.append(load_template(stem))
             except Bad as exc:
-                out.append({"name": fn[:-4], "error": str(exc)})
+                out.append({"name": stem, "error": str(exc)})
     return out
 
 

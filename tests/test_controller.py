@@ -27,10 +27,10 @@ def setup():
     work = pathlib.Path(tmp, "work")
     tpl.mkdir()
     work.mkdir()
-    (tpl / "good.tpl").write_text(
+    (tpl / "good.yml").write_text(
         "name: good\nimage: alpine@sha256:" + "a" * 64 + "\n")
-    (tpl / "tagged.tpl").write_text("name: tagged\nimage: alpine:3.21\n")
-    (tpl / "evil.tpl").write_text("name: evil\nimage: alpine@sha256:" + "b" * 64 +
+    (tpl / "tagged.yml").write_text("name: tagged\nimage: alpine:3.21\n")
+    (tpl / "evil.yml").write_text("name: evil\nimage: alpine@sha256:" + "b" * 64 +
                                   "\nprivileged: true\n")
     fake = HERE / "fake-docker"
     os.chmod(fake, 0o755)
@@ -88,12 +88,12 @@ def main():
 
     print("网络字段")
     tpldir = pathlib.Path(mod.TEMPLATES_DIR)
-    (tpldir / "nonet.tpl").write_text(
+    (tpldir / "nonet.yml").write_text(
         "name: nonet\nimage: alpine@sha256:" + "c" * 64 + "\nnetwork: none\n")
     mod.do_create({"template": "nonet", "task": "netdemo"})
     netargs = " ".join(log[-1])
     check("network: none 会传 --network none", "--network none" in netargs)
-    (tpldir / "badnet.tpl").write_text(
+    (tpldir / "badnet.yml").write_text(
         "name: badnet\nimage: alpine@sha256:" + "d" * 64 + "\nnetwork: 'host; rm -rf /'\n")
     check("拒绝非法 network 名", raises(lambda: mod.load_template("badnet"), mod.Bad))
 
@@ -113,6 +113,36 @@ def main():
     check("拒绝空 cmd", raises(lambda: mod.do_exec("demo", {"cmd": []}), mod.Bad))
     check("拒绝字符串 cmd（防命令注入）", raises(lambda: mod.do_exec("demo", {"cmd": "rm -rf /"}), mod.Bad))
     check("拒绝相对 workdir", raises(lambda: mod.do_exec("demo", {"cmd": ["ls"], "workdir": "etc"}), mod.Bad))
+
+    print("YAML 模板解析")
+    tpldir = tpl = pathlib.Path(mod.TEMPLATES_DIR)
+    (tpl / "nested.yml").write_text(
+        "name: nested\nimage: alpine@sha256:" + "c" * 64 + "\nresources:\n  cpus: 2\n")
+    check("拒绝嵌套 mapping（只收纯量）",
+          raises(lambda: mod.load_template("nested"), mod.Bad))
+    (tpl / "broken.yml").write_text("name: broken\nimage: [unclosed\n")
+    check("拒绝坏 YAML", raises(lambda: mod.load_template("broken"), mod.Bad))
+    (tpl / "list.yml").write_text("- name: x\n- image: y\n")
+    check("拒绝非 mapping 的 YAML", raises(lambda: mod.load_template("list"), mod.Bad))
+    (tpl / "boolval.yml").write_text(
+        "name: boolval\nimage: alpine@sha256:" + "d" * 64 + "\nuser: true\n")
+    check("拒绝 boolean 值（防 true/yes 误解析）",
+          raises(lambda: mod.load_template("boolval"), mod.Bad))
+    (tpl / "num.yml").write_text(
+        "name: num\nimage: alpine@sha256:" + "e" * 64 + "\ncpus: 4\nmemory: 2g\n")
+    nt = mod.load_template("num")
+    check("YAML 整数转成字符串", nt["cpus"] == "4" and nt["memory"] == "2g")
+    # 旧 .tpl 仍可读，但同名 .yml 优先
+    (tpl / "legacy.tpl").write_text(
+        "name: legacy\nimage: alpine@sha256:" + "f" * 64 + "\n")
+    check("旧的 .tpl 仍然可读", mod.load_template("legacy")["name"] == "legacy")
+    (tpl / "both.tpl").write_text(
+        "name: fromtpl\nimage: alpine@sha256:" + "a" * 64 + "\n")
+    (tpl / "both.yml").write_text(
+        "name: fromyml\nimage: alpine@sha256:" + "b" * 64 + "\n")
+    check("同名时 .yml 优先", mod.load_template("both")["name"] == "fromyml")
+    names = [x.get("name") for x in mod.list_templates()]
+    check("list_templates 不重复", names.count("fromyml") == 1 and "fromtpl" not in names)
 
     print("结果")
     if failures:
