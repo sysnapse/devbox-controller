@@ -18,7 +18,9 @@
 
 services:
   controller:
-    build: ./controller
+    build:
+      context: .
+      dockerfile: controller/Dockerfile
     image: devbox-controller:local
     container_name: devbox-controller
     restart: unless-stopped

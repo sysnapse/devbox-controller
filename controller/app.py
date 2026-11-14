@@ -29,6 +29,9 @@ from urllib.parse import urlparse
 
 TOKEN = os.environ.get("DCA_TOKEN", "")
 TEMPLATES_DIR = os.environ.get("DCA_TEMPLATES_DIR", "/templates")
+# 镜像内置的模板副本（构建时 COPY 进来）。挂载目录为空或不存在时用它，
+# 避免 compose 在别处启动时整个 API 变成零模板。
+TEMPLATES_FALLBACK = os.environ.get("DCA_TEMPLATES_DIR_FALLBACK", "/opt/templates")
 WORK_ROOT = os.environ.get("DCA_WORK_ROOT", "/work")
 # 空字符串或 "default" = 不传 --network，完全不需要 docker network create。
 # 要隔离可设 "none"；要指定已存在的网络就填名字。
@@ -61,14 +64,32 @@ class Bad(Exception):
 TPL_KEYS = {"name", "image", "workdir", "network", "cpus", "memory", "pids", "user", "notes"}
 
 
+def template_dirs():
+    """按优先次序返回可用模板目录：挂载目录优先，镜像内置副本兜底。"""
+    out = []
+    for d in (TEMPLATES_DIR, TEMPLATES_FALLBACK):
+        if d and os.path.isdir(d) and d not in out:
+            out.append(d)
+    return out
+
+
+def find_template_file(name):
+    """在模板目录里找 <name>.tpl，先挂载后内置；路径越界一律拒绝。"""
+    for d in template_dirs():
+        root = os.path.realpath(d)
+        real = os.path.realpath(os.path.join(d, name + ".tpl"))
+        if not real.startswith(root + os.sep):
+            raise Bad("template 路径越界")
+        if os.path.isfile(real):
+            return real
+    return None
+
+
 def load_template(name):
     if not NAME_RE.match(name or ""):
         raise Bad("template name 不合法")
-    path = os.path.join(TEMPLATES_DIR, name + ".tpl")
-    real = os.path.realpath(path)
-    if not real.startswith(os.path.realpath(TEMPLATES_DIR) + os.sep):
-        raise Bad("template 路径越界")
-    if not os.path.isfile(real):
+    real = find_template_file(name)
+    if not real:
         raise Bad("template 不存在：" + name)
     tpl = {}
     with open(real, "r", encoding="utf-8") as fh:
@@ -108,10 +129,16 @@ def load_template(name):
 
 def list_templates():
     out = []
-    if not os.path.isdir(TEMPLATES_DIR):
-        return out
-    for fn in sorted(os.listdir(TEMPLATES_DIR)):
-        if fn.endswith(".tpl"):
+    seen = set()
+    for d in template_dirs():
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for fn in names:
+            if not fn.endswith(".tpl") or fn[:-4] in seen:
+                continue
+            seen.add(fn[:-4])
             try:
                 out.append(load_template(fn[:-4]))
             except Bad as exc:

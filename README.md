@@ -186,6 +186,14 @@ user: "1000:1000"
 - `image` without `@sha256:` is rejected unless `DCA_ALLOW_TAGS=1`, which is not recommended.
 - The template directory is mounted `:ro` into the controller and is invisible to the agent, so the agent cannot edit it.
 
+### Built-in copies (why the API is never template-less)
+
+The image also carries a copy of `templates/` at `/opt/templates`. Resolution order is the mounted directory first, then the built-in copy. This exists because of a real failure: if `docker compose` is started from a directory where `./templates` does not exist, Docker creates an *empty* directory for the bind mount, the controller then reports `[]` templates, and every `dc new` fails with `template 不存在`.
+
+The build context is therefore the repository root (`context: .`, `dockerfile: controller/Dockerfile`), not `./controller`. If you edit `templates/*.tpl`, rebuild with `docker compose up -d --build`; a plain restart will not refresh the built-in copies.
+
+`templates/base.tpl` is the only template that should ever need editing for local mirrors; keep the digest lines intact.
+
 ## Narrowing egress (optional, not built in)
 
 A devbox on the default bridge can reach the public internet and also the host's internal networks. To block the latter, add nftables rules **on the host** (`apk add nftables`):

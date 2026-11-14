@@ -10,11 +10,14 @@ ARG DCA_GID=1000
 # 这样 controller 写的档案 devbox 可以直接改；要改就 --build-arg DCA_UID=...
 RUN addgroup -g ${DCA_GID} dca && adduser -D -u ${DCA_UID} -G dca dca
 
-COPY app.py /app/app.py
-RUN chmod 0555 /app/app.py && mkdir -p /work && chown ${DCA_UID}:${DCA_GID} /work
+COPY controller/app.py /app/app.py
+# 内置模板副本：挂载目录为空时兜底，保证 API 永远至少有三个模板
+COPY templates/ /opt/templates/
+RUN chmod 0555 /app/app.py && chmod -R a+rX /opt/templates && mkdir -p /work && chown ${DCA_UID}:${DCA_GID} /work
 
 ENV PYTHONUNBUFFERED=1 \
     DCA_TEMPLATES_DIR=/templates \
+    DCA_TEMPLATES_DIR_FALLBACK=/opt/templates \
     DCA_WORK_ROOT=/work \
     DCA_PORT=47123
 
