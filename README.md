@@ -75,19 +75,23 @@ Every step above is one HTTP call. The agent has no other way in: no socket, no 
 ## Deploy (on the host)
 
 ```sh
-# 1. Note the uid, gid and the docker group gid
-id -u; id -g; ls -l /var/run/docker.sock
-
-# 2. Create the work root (the same host path is bind-mounted into devboxes)
-mkdir -p /storage/dca/work && cd /storage/dca
-
-# 3. Unpack this repo, then
-cp .env.example .env && vi .env     # DCA_TOKEN, DCA_HOST_WORK_ROOT, DOCKER_GID
-
-# 4. Start the controller
-docker compose -f compose.yml up -d --build
-docker compose -f compose.yml logs -f controller
+git clone https://github.com/sysnapse/devbox-controller.git
+cd devbox-controller
+./setup.sh                          # idempotent; safe to re-run
+docker compose up -d --build
+docker compose logs -f controller
 ```
+
+`setup.sh` only touches the things that are easy to get wrong by hand:
+
+| Step | What it does |
+|---|---|
+| `.env` | copies `.env.example` if missing; **never overwrites an existing token** |
+| `DCA_TOKEN` | generates a 32-byte hex token if the value is empty or shorter than 16 chars |
+| `DCA_HOST_WORK_ROOT` | defaults to `$PWD/work` (absolute), keeps your value if already set |
+| work root | `mkdir -p`, then makes it writable by the uid the controller runs as |
+| `DOCKER_GID` | reads the real group id off `/var/run/docker.sock` |
+| `DCA_PORT` | migrates an old `8080` to `47123` |
 
 The startup log should read:
 
@@ -95,14 +99,33 @@ The startup log should read:
 devbox controller listening on 0.0.0.0:47123 (owner=agent, work_root=..., network=(docker default))
 ```
 
-On startup the controller also checks that `DCA_HOST_WORK_ROOT` is writable; if it is not, it exits with a plain-language error instead of failing later on the first request.
+### Why the work root needs a host-side fix
 
-If you ran an earlier build that created `dca-abnet` / `dca-c` networks, clean up once:
+The controller runs as an **unprivileged uid inside its container** (`DCA_UID`, default `1000`) so that files it clones stay writable inside the devbox, whose templates also use `1000:1000`. An unprivileged container **cannot `chown` the host side of a bind mount**, so the directory has to be prepared from the host, once:
 
 ```sh
-docker compose -f compose.yml down
+# recommended: let setup.sh do it
+./setup.sh
+
+# or by hand
+sudo mkdir -p /srv/devbox-work && sudo chown 1000:1000 /srv/devbox-work
+# then set DCA_HOST_WORK_ROOT=/srv/devbox-work in .env
+```
+
+On a host where your own login is uid 1000 (common on a Pi), `mkdir work` as yourself is already enough — no `sudo` involved. If `DCA_HOST_WORK_ROOT` is not writable the controller **refuses to start** and prints the exact `chown` command with the real uid/gid, instead of failing later on the first task.
+
+Changing `DCA_UID` means also passing the same value to the image build, and changing the `user:` in your templates:
+
+```sh
+docker compose build --build-arg DCA_UID=1001 --build-arg DCA_GID=1001
+```
+
+### Coming from an earlier build
+
+```sh
+docker compose down
 docker rm -f $(docker ps -aq --filter label=devbox.owner=agent) 2>/dev/null
-docker network rm dca-abnet dca-c 2>/dev/null
+docker network rm dca-abnet dca-c 2>/dev/null   # only if you ever created them
 ```
 
 ## Self-check

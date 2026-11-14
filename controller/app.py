@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-dca controller —— 唯一持有 docker socket 的组件（controller 容器）。
+devbox controller —— 唯一持有 docker socket 的组件（controller 容器）。
 
 三个角色用人类可读的名字：agent（呼叫方）、controller（本进程，建环境）、
 devbox（被建出来的开发环境容器）。
@@ -182,8 +182,12 @@ def do_create(payload):
     try:
         os.makedirs(work, exist_ok=True)
     except OSError as exc:
-        raise Bad("无法建立 workspace %s（uid=%d）：%s；请确认宿主目录已 chown 给该 uid"
-                  % (work, os.getuid(), exc))
+        raise Bad(
+            "cannot create workspace %s (controller uid=%d): %s. "
+            "Fix on the host: sudo mkdir -p %s && sudo chown %d:%d %s "
+            "(or run ./setup.sh)."
+            % (work, os.getuid(), exc, WORK_ROOT, os.getuid(), os.getgid(), WORK_ROOT)
+        )
     os.chmod(work, 0o777)  # C 以非 root uid 跑；bind mount 沿用宿主 ownership，只放开该 task 目录
     existing = docker(["ps", "-a", "--filter", "name=^%s$" % cname(task),
                        "--format", "{{.Names}}"], check=False).stdout.strip()
@@ -462,14 +466,28 @@ def main():
             fh.write("ok")
         os.unlink(probe)
     except OSError as exc:
-        print("WORK_ROOT 不可写：%s（uid=%d gid=%d，错误 %s）\n"
-              "修法：在宿主执行 mkdir -p <WORK_ROOT> && chown <uid>:<gid> <WORK_ROOT>，"
-              "或把 DCA_HOST_WORK_ROOT 指到一个该 uid 可写的目录。"
-              % (WORK_ROOT, os.getuid(), os.getgid(), exc), file=sys.stderr)
+        print(
+            "WORK_ROOT is not writable: %s\n"
+            "  controller runs as uid=%d gid=%d inside its container.\n"
+            "  The host directory must be owned by (or writable by) that uid;\n"
+            "  a container cannot chown the host side itself.\n"
+            "\n"
+            "  On the host, either run the bundled setup (recommended, idempotent):\n"
+            "      ./setup.sh\n"
+            "  or do it by hand:\n"
+            "      sudo mkdir -p %s && sudo chown %d:%d %s\n"
+            "  or point DCA_HOST_WORK_ROOT at a directory that uid can already write,\n"
+            "  e.g. $PWD/work inside your clone of this repo.\n"
+            "\n"
+            "  underlying error: %s"
+            % (WORK_ROOT, os.getuid(), os.getgid(),
+               WORK_ROOT, os.getuid(), os.getgid(), WORK_ROOT, exc),
+            file=sys.stderr,
+        )
         return 2
     threading.Thread(target=reaper, daemon=True).start()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
-    print("dca controller listening on %s:%s (owner=%s, work_root=%s, network=%s)"
+    print("devbox controller listening on %s:%s (owner=%s, work_root=%s, network=%s)"
           % (BIND, PORT, OWNER, WORK_ROOT, DEFAULT_NETWORK or "(docker default)"), flush=True)
     srv.serve_forever()
     return 0
