@@ -8,4 +8,6 @@ cpus: 1
 memory: 1g
 pids: 256
 user: "1000:1000"
+# Installed with apk at create time, so git clone/push works inside
+packages: [git]
 notes: "minimal toolchain; use node22/python312 for real workloads"

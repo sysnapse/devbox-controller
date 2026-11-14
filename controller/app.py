@@ -50,6 +50,14 @@ ALLOW_PRIVATE_URL = os.environ.get("DCA_ALLOW_PRIVATE_URL", "0") == "1"
 # a git credential helper, so it never appears in argv or in a .git/config remote.
 GIT_TOKEN = os.environ.get("DCA_GIT_TOKEN", "")
 GIT_USER = os.environ.get("DCA_GIT_USER", "x-access-token")
+# Commit identity used inside every devbox (so git commit works with no setup).
+GIT_NAME = os.environ.get("DCA_GIT_NAME", "sysnapse")
+GIT_EMAIL = os.environ.get("DCA_GIT_EMAIL",
+                           "8198069+sysnapse@users.noreply.github.com")
+# Also install the identity and the token inside each devbox, so the agent can run
+# git clone/commit/push in the container itself. DCA_INJECT_GIT=0 keeps the token
+# on the controller side only (clone/push then has to go through `dc clone`/`dc push`).
+INJECT_GIT = os.environ.get("DCA_INJECT_GIT", "1") == "1"
 # Binds 0.0.0.0 by default: the agent may sit on a bridge, where the only route in
 # is the bridge gateway. Authentication is the token, not the bind address.
 BIND = os.environ.get("DCA_BIND", "0.0.0.0")
@@ -58,6 +66,7 @@ PORT = int(os.environ.get("DCA_PORT", "47123"))
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")
 DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}$")
 NET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+PKG_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]{0,63}$")
 
 _last_used = {}
 _lock = threading.Lock()
@@ -69,7 +78,8 @@ class Bad(Exception):
 
 # ------------------------------------------------------------ templates
 
-TPL_KEYS = {"name", "image", "workdir", "network", "cpus", "memory", "pids", "user", "notes"}
+TPL_KEYS = {"name", "image", "workdir", "network", "cpus", "memory", "pids", "user",
+            "notes", "packages"}
 # A template is plain YAML (templates/<name>.yml). Legacy *.tpl files are still
 # accepted while upgrading; .yml wins on a name clash, so renaming can be gradual.
 TPL_EXTS = (".yml", ".tpl")
@@ -114,6 +124,16 @@ def find_template_file(name):
     return None
 
 
+def key_is_pkgs(val):
+    """A template packages list: <=12 entries, each a safe apk package name."""
+    if len(val) > 12:
+        return False
+    for item in val:
+        if not isinstance(item, str) or not PKG_RE.match(item.strip()):
+            return False
+    return True
+
+
 def load_template(name):
     if not NAME_RE.match(name or ""):
         raise Bad("invalid template name")
@@ -133,6 +153,11 @@ def load_template(name):
     for key, val in doc.items():
         if key not in TPL_KEYS:
             raise Bad("template has an unknown field: " + str(key))
+        if key == "packages":
+            if not isinstance(val, list) or not key_is_pkgs(val):
+                raise Bad("template field packages must be a list of package names")
+            tpl["packages"] = [str(p).strip() for p in val]
+            continue
         if isinstance(val, bool) or not isinstance(val, (str, int, float)):
             raise Bad("template field must be a scalar: " + str(key))
         tpl[str(key)] = str(val).strip()
@@ -152,6 +177,7 @@ def load_template(name):
     tpl.setdefault("memory", "4g")
     tpl.setdefault("pids", "512")
     tpl.setdefault("user", "1000:1000")
+    tpl.setdefault("packages", [])
     if not tpl["workdir"].startswith("/"):
         raise Bad("template workdir must be an absolute path")
     tpl["_file"] = os.path.basename(real)
@@ -229,6 +255,96 @@ def require_container(task):
 
 # ------------------------------------------------------------- actions
 
+GIT_HELPER_SCRIPT = """#!/bin/sh
+# Installed by the devbox controller at container creation.
+u="${DCA_GIT_USER:-x-access-token}"
+if [ -n "$DCA_GIT_TOKEN" ]; then
+  t="$DCA_GIT_TOKEN"
+else
+  t=$(cat /etc/devbox-git-token 2>/dev/null)
+fi
+[ -z "$t" ] && exit 0
+echo "username=$u"
+echo "password=$t"
+"""
+
+GIT_CONFIG_TEMPLATE = """[user]
+\tname = %s
+\temail = %s
+[credential]
+\thelper = /usr/local/bin/git-credential-devbox
+[init]
+\tdefaultBranch = main
+[safe]
+\tdirectory = *
+"""
+
+PKG_NOTE = ("template has no packages, so git is missing; add "
+            "packages: [git] to the template")
+
+
+def container_write(task, path, content, mode):
+    """Write a file inside the devbox as root; content goes over stdin, not argv."""
+    proc = subprocess.run(
+        [DOCKER, "exec", "-i", "-u", "0", cname(task), "sh", "-c",
+         "cat > " + path + " && chmod " + mode + " " + path],
+        input=content, text=True, capture_output=True, timeout=120)
+    ok = proc.returncode == 0
+    return ok, ("" if ok else (proc.stderr.strip() or proc.stdout.strip())[-400:])
+
+
+def container_has_git(task):
+    proc = subprocess.run([DOCKER, "exec", cname(task), "sh", "-c", "command -v git"],
+                          capture_output=True, text=True, timeout=60)
+    return proc.returncode == 0 and bool(proc.stdout.strip())
+
+
+def install_packages(task, pkgs):
+    """apk add as root, so the template can ship git/curl without a custom image."""
+    if not pkgs:
+        return "none"
+    proc = subprocess.run(
+        [DOCKER, "exec", "-u", "0", cname(task), "sh", "-c",
+         "apk add --no-cache " + " ".join(pkgs)],
+        capture_output=True, text=True, timeout=600)
+    if proc.returncode != 0:
+        return "failed: " + (proc.stderr.strip() or proc.stdout.strip())[-400:]
+    return "ok"
+
+
+def configure_git(task, tpl):
+    """Give the devbox a commit identity and a token-backed credential helper."""
+    if not INJECT_GIT:
+        return "skipped (DCA_INJECT_GIT=0)"
+    if not container_has_git(task):
+        return "skipped (git not installed: " + PKG_NOTE + ")"
+    ok, err = container_write(task, "/usr/local/bin/git-credential-devbox",
+                              GIT_HELPER_SCRIPT, "0755")
+    if not ok:
+        return "helper failed: " + err
+    ok, err = container_write(task, "/etc/gitconfig",
+                              GIT_CONFIG_TEMPLATE % (GIT_NAME, GIT_EMAIL), "0644")
+    if not ok:
+        return "gitconfig failed: " + err
+    if not GIT_TOKEN:
+        return "identity only (no DCA_GIT_TOKEN set)"
+    ok, err = container_write(task, "/etc/devbox-git-token", GIT_TOKEN, "0644")
+    if not ok:
+        return "token failed: " + err
+    return "ok (identity + token)"
+
+
+def devbox_env_args():
+    """-e flags for git identity only; the token never goes into docker argv."""
+    pairs = (("GIT_AUTHOR_NAME", GIT_NAME), ("GIT_AUTHOR_EMAIL", GIT_EMAIL),
+             ("GIT_COMMITTER_NAME", GIT_NAME), ("GIT_COMMITTER_EMAIL", GIT_EMAIL))
+    out = []
+    for key, val in pairs:
+        if val:
+            out += ["-e", key + "=" + val]
+    return out
+
+
 def do_create(payload):
     task = require_task(payload.get("task", ""))
     tpl = load_template(payload.get("template", ""))
@@ -260,6 +376,7 @@ def do_create(payload):
         "--user", tpl["user"],
         "-w", tpl["workdir"],
         "-v", work + ":" + tpl["workdir"],
+    ] + devbox_env_args() + [
         tpl["image"],
         "sleep", "infinity",
     ]
@@ -268,8 +385,11 @@ def do_create(payload):
         args[args.index("-w"):args.index("-w")] = ["--network", net]
     docker(args, timeout=180, check=True)
     touch(task)
+    pkg_state = install_packages(task, tpl.get("packages") or [])
+    git_state = configure_git(task, tpl)
     return {"task": task, "template": tpl["name"], "container": cname(task),
-            "workdir": tpl["workdir"], "host_path": work}
+            "workdir": tpl["workdir"], "host_path": work,
+            "packages": pkg_state, "git": git_state}
 
 
 def do_exec(task, payload):

@@ -8,4 +8,6 @@ cpus: 2
 memory: 4g
 pids: 512
 user: "1000:1000"
+# Installed with apk at create time, so git clone/push works inside
+packages: [git]
 notes: "pip/poetry workloads; uses the default bridge for package installs"

@@ -43,6 +43,12 @@ services:
       # handed to git through a credential helper, never to the devbox.
       DCA_GIT_TOKEN: "${DCA_GIT_TOKEN:-}"
       DCA_GIT_USER: "${DCA_GIT_USER:-x-access-token}"
+      # Commit identity written into every devbox, plus the token, so the agent can
+      # git clone/commit/push inside the container. DCA_INJECT_GIT=0 keeps the token
+      # on this side only (then use `dc clone` / `dc push`).
+      DCA_INJECT_GIT: "${DCA_INJECT_GIT:-1}"
+      DCA_GIT_NAME: "${DCA_GIT_NAME:-sysnapse}"
+      DCA_GIT_EMAIL: "${DCA_GIT_EMAIL:-8198069+sysnapse@users.noreply.github.com}"
       GIT_TERMINAL_PROMPT: "0"
     volumes:
       # Must equal DCA_HOST_WORK_ROOT, or docker resolves the bind mount to an empty dir

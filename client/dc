@@ -17,6 +17,11 @@ Usage:
   dc stop <task>
   dc rm <task>
 
+Inside a devbox (dc exec) git is ready to use: a commit identity is set and a
+credential helper reads /etc/devbox-git-token, so `git clone`, `git commit` and
+`git push` all work. `dc clone` / `dc push` run the same operations on the
+controller side, which is useful when DCA_INJECT_GIT=0.
+
 Environment:
   DCA_URL    Autodetected when unset: http://<this host default gateway>:47123,
              then http://172.17.0.1:47123, then http://127.0.0.1:47123 (host network).

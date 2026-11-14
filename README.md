@@ -10,7 +10,7 @@ flowchart LR
     subgraph host["pi5 host"]
         gw["docker0 gateway<br/>172.17.0.1:47123"]
         ctrl["controller<br/>devbox-controller container<br/>network_mode: host<br/>docker socket + git credentials"]
-        dbx["devbox-TASK<br/>one container per task<br/>cap_drop: ALL<br/>no-new-privileges<br/>no socket, no git token<br/>only /workspace mounted"]
+        dbx["devbox-TASK<br/>one container per task<br/>cap_drop: ALL<br/>no-new-privileges<br/>no socket<br/>only /workspace mounted<br/>git ready: identity + scoped token"]
     end
     gh["GitHub"]
 
@@ -180,10 +180,17 @@ cpus: 2
 memory: 4g
 pids: 512
 user: "1000:1000"
+packages: [git]       # optional, installed with apk at create time
 ```
 
-- Only those eight keys (plus `notes`) are accepted. Any other key, such as `privileged`, rejects the whole file.
-- Values must be scalars (string, integer or float). Nested mappings, lists and booleans are rejected, so `user: true` cannot be silently read as the string `true`.
+- Only those nine keys (plus `notes`) are accepted. Any other key, such as `privileged`, rejects the whole file.
+- Values must be scalars (string, integer or float), except `packages`, which is the one allowed list:
+  at most 12 entries, each matching `[a-z0-9][a-z0-9._+-]*`. That regex is what stops a template from
+  smuggling `git; rm -rf /` into the `apk add` line. Nested mappings and booleans are still rejected,
+  so `user: true` cannot be silently read as the string `true`.
+- `packages` exist so a stock `alpine`, `node:22-alpine` or `python:3.12-alpine` image can still run git:
+  they are installed as root right after the container starts. If the install fails, `dc new` still
+  succeeds and reports `packages: failed: ...` instead of pretending the box is complete.
 - `image` without `@sha256:` is rejected unless `DCA_ALLOW_TAGS=1`, which is not recommended.
 - The template directory is mounted `:ro` into the controller and is invisible to the agent, so the agent cannot edit it.
 - Legacy `*.tpl` files are still read during migration; when both `foo.yml` and `foo.tpl` exist, `foo.yml` wins. New templates should be `.yml` only.
@@ -196,11 +203,42 @@ The build context is therefore the repository root (`context: .`, `dockerfile: c
 
 `templates/base.yml` is the only template that should ever need editing for local mirrors; keep the digest lines intact.
 
-## Git credentials (why the token never reaches the devbox)
+## Git
 
-`clone` and `push` run **on the host**, inside the controller process, not in the devbox.
-If `DCA_GIT_TOKEN` is set, every git call is prefixed with an inline credential helper and
-`GIT_TERMINAL_PROMPT=0`:
+Two ways to move code, both use the same token:
+
+### 1. Inside the devbox (default)
+
+At container creation the controller writes three files as root, then the devbox is a normal
+git checkout away from working:
+
+| Path | Contents |
+|---|---|
+| `/etc/gitconfig` | `user.name`, `user.email`, `credential.helper`, `init.defaultBranch=main`, `safe.directory=*` |
+| `/usr/local/bin/git-credential-devbox` | credential helper that prints the token as the password |
+| `/etc/devbox-git-token` | the token itself, mode `0644` |
+
+So this works with no setup at all:
+
+```sh
+dc exec mytask -- git clone https://github.com/you/repo.git
+dc exec mytask -- sh -c 'cd repo && echo x >> f && git commit -am wip && git push'
+```
+
+- The identity comes from `DCA_GIT_NAME` / `DCA_GIT_EMAIL`, not from a host `~/.gitconfig`.
+- The token is written **over stdin**, so it never appears in `docker run` argv, `docker inspect`,
+  a process listing, or `.git/config`; `url.insteadOf` is not used, so remotes stay clean.
+- `git` has to exist in the image. The bundled templates install it with `packages: [git]`.
+  If a template has no `packages`, `dc new` reports `git: skipped (git not installed: ...)`.
+- Tools that want a token in the environment can `export GH_TOKEN=$(cat /etc/devbox-git-token)`.
+- `DCA_INJECT_GIT=0` turns all of this off, so the token stays on the controller side only.
+
+### 2. On the controller (`dc clone` / `dc push`)
+
+`dc clone <task> <url>` and `dc push <task> [dir]` run git **on the host** in the controller
+process. Useful when injecting is switched off, or when the working copy came from somewhere
+that is not a container shell. The token is passed to git through the process environment and
+an inline credential helper, never in argv and never in `.git/config`.
 
 ```sh
 git -c credential.helper= \
@@ -208,14 +246,19 @@ git -c credential.helper= \
     clone -- <url> <dest>
 ```
 
-- The token travels in the **environment of the controller process**: not in argv, not in
-  `.git/config`, and never inside a devbox image or its filesystem.
-- The devbox only sees ordinary files. A task that needs `git push` asks the controller,
-  and the controller pushes the working copy from the host.
-- Without a token only public repositories clone, and `push` fails with a normal git
-  authentication error.
-- Use a fine-grained PAT limited to the target repository with `contents: write`.
-  A classic token carrying org/admin scopes is overkill and widens the blast radius of a leak.
+Without a token only public repositories clone, and `push` fails with a normal git
+authentication error.
+
+### Scope the token, and know what the devbox can see
+
+Use a fine-grained PAT limited to the repositories the agent may touch, with `contents: write`.
+A classic token carrying org/admin scopes is overkill and widens the blast radius of a leak.
+
+Be honest about the trade: inside a devbox the token is readable by anything running in that
+devbox (env or file — same access either way). Devboxes share the default bridge with the agent
+container, so code you run there can also try to reach the agent. That is the cost of letting the
+agent run git itself instead of funnelling every push through the controller. If that is too
+much, set `DCA_INJECT_GIT=0` and only use `dc clone` / `dc push`.
 
 ## Narrowing egress (optional, not built in)
 
@@ -244,8 +287,10 @@ Devboxes still need the public internet for `git clone` and package installs, so
 | `DCA_IDLE_HOURS` | `0` | If > 0, periodically stop idle tasks |
 | `DCA_ALLOW_TAGS` | `0` | Allow image tags instead of digests (not recommended) |
 | `DCA_ALLOW_PRIVATE_URL` | `0` | Allow cloning private/internal URLs (not recommended) |
-| `DCA_GIT_TOKEN` | empty | Optional host-side git token for clone/push; never enters a devbox |
+| `DCA_GIT_TOKEN` | empty | Git token for `dc clone`/`dc push`, and copied into each devbox when injection is on |
 | `DCA_GIT_USER` | `x-access-token` | Username paired with `DCA_GIT_TOKEN` |
+| `DCA_INJECT_GIT` | `1` | Write identity, credential helper and token into each devbox; `0` keeps the token on the controller |
+| `DCA_GIT_NAME` / `DCA_GIT_EMAIL` | `sysnapse` / `8198069+sysnapse@users.noreply.github.com` | Commit identity inside devboxes |
 
 ## What has been tested
 
