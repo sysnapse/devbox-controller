@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-devbox controller —— 唯一持有 docker socket 的组件（controller 容器）。
+devbox controller - the only component that holds the docker socket.
 
-三个角色用人类可读的名字：agent（呼叫方）、controller（本进程，建环境）、
-devbox（被建出来的开发环境容器）。
+Three roles, each with a human-readable name: agent (the caller), controller
+(this process, which builds environments), devbox (the container it builds).
 
-设计要点：
-  * agent 只能经 HTTP + Bearer token 呼叫本 API，拿不到 socket。
-  * 模板由 owner 写死在 /templates（标准 YAML，*.yml），agent 只能点名，不能传任何 docker flag。
-  * 所有容器带 label devbox.task / devbox.owner，只操作带该 label 的容器。
-  * 只依赖 Python 标准库 + PyYAML + docker CLI，无其他第三方套件。
+Design notes:
+  * The agent calls this API over HTTP with a Bearer token; it never gets the socket.
+  * Templates are fixed by the owner in /templates (plain YAML). The agent names one
+    and cannot pass any docker flag.
+  * Every container carries devbox.task / devbox.owner labels; only labelled ones are touched.
+  * Depends on the Python standard library, PyYAML and the docker CLI only.
 """
 
 import hmac
@@ -27,16 +28,16 @@ from urllib.parse import urlparse
 
 import yaml
 
-# ---------------------------------------------------------------- 配置
+# --------------------------------------------------------------- config
 
 TOKEN = os.environ.get("DCA_TOKEN", "")
 TEMPLATES_DIR = os.environ.get("DCA_TEMPLATES_DIR", "/templates")
-# 镜像内置的模板副本（构建时 COPY 进来）。挂载目录为空或不存在时用它，
-# 避免 compose 在别处启动时整个 API 变成零模板。
+# Templates baked into the image at build time. Used when the mounted directory
+# is empty or missing, so the API never reports zero templates.
 TEMPLATES_FALLBACK = os.environ.get("DCA_TEMPLATES_DIR_FALLBACK", "/opt/templates")
 WORK_ROOT = os.environ.get("DCA_WORK_ROOT", "/work")
-# 空字符串或 "default" = 不传 --network，完全不需要 docker network create。
-# 要隔离可设 "none"；要指定已存在的网络就填名字。
+# Empty or "default" = no --network flag, so no docker network create is needed.
+# Set "none" to isolate; to attach an existing network, put its name here.
 DEFAULT_NETWORK = os.environ.get("DCA_NETWORK", "")
 OWNER = os.environ.get("DCA_OWNER", "agent")
 DOCKER = os.environ.get("DCA_DOCKER", "docker")
@@ -44,8 +45,13 @@ EXEC_TIMEOUT = int(os.environ.get("DCA_EXEC_TIMEOUT", "900"))
 IDLE_HOURS = float(os.environ.get("DCA_IDLE_HOURS", "0"))
 ALLOW_TAGS = os.environ.get("DCA_ALLOW_TAGS", "0") == "1"
 ALLOW_PRIVATE_URL = os.environ.get("DCA_ALLOW_PRIVATE_URL", "0") == "1"
-# 默认绑 0.0.0.0：agent 容器未必在 host 网络，要用 docker0 网关 172.17.0.1 才连得上。
-# 认证完全靠 token，不靠绑定地址。
+# Optional git credentials for clone/push, kept on the host side only.
+# The token never reaches the devbox: it is read from this process environment by
+# a git credential helper, so it never appears in argv or in a .git/config remote.
+GIT_TOKEN = os.environ.get("DCA_GIT_TOKEN", "")
+GIT_USER = os.environ.get("DCA_GIT_USER", "x-access-token")
+# Binds 0.0.0.0 by default: the agent may sit on a bridge, where the only route in
+# is the bridge gateway. Authentication is the token, not the bind address.
 BIND = os.environ.get("DCA_BIND", "0.0.0.0")
 PORT = int(os.environ.get("DCA_PORT", "47123"))
 
@@ -58,19 +64,19 @@ _lock = threading.Lock()
 
 
 class Bad(Exception):
-    """用户输入不合法（4xx）。"""
+    """Invalid input from the caller (4xx)."""
 
 
-# ---------------------------------------------------------------- 模板
+# ------------------------------------------------------------ templates
 
 TPL_KEYS = {"name", "image", "workdir", "network", "cpus", "memory", "pids", "user", "notes"}
-# 模板就是普通 YAML 檔（templates/<name>.yml）。舊的 *.tpl 在升級期間仍然接受，
-# 同名時 .yml 優先，方便 owner 逐步改名而不用停機。
+# A template is plain YAML (templates/<name>.yml). Legacy *.tpl files are still
+# accepted while upgrading; .yml wins on a name clash, so renaming can be gradual.
 TPL_EXTS = (".yml", ".tpl")
 
 
 def template_dirs():
-    """按优先次序返回可用模板目录：挂载目录优先，镜像内置副本兜底。"""
+    """Template directories in priority order: the mount first, the baked-in copy last."""
     out = []
     for d in (TEMPLATES_DIR, TEMPLATES_FALLBACK):
         if d and os.path.isdir(d) and d not in out:
@@ -79,7 +85,7 @@ def template_dirs():
 
 
 def template_stems(d):
-    """目录内的模板名 -> 副档名；同名时 .yml 优先于 .tpl。"""
+    """Map of template stem -> extension in one directory; .yml beats .tpl."""
     out = {}
     try:
         names = sorted(os.listdir(d))
@@ -96,13 +102,13 @@ def template_stems(d):
 
 
 def find_template_file(name):
-    """找 <name>.yml（或旧 <name>.tpl），先挂载后内置；路径越界一律拒绝。"""
+    """Find <name>.yml (or legacy <name>.tpl): mount first, then baked-in; reject traversal."""
     for d in template_dirs():
         root = os.path.realpath(d)
         for ext in TPL_EXTS:
             real = os.path.realpath(os.path.join(d, name + ext))
             if not real.startswith(root + os.sep):
-                raise Bad("template 路径越界")
+                raise Bad("template path escapes its directory")
             if os.path.isfile(real):
                 return real
     return None
@@ -110,44 +116,44 @@ def find_template_file(name):
 
 def load_template(name):
     if not NAME_RE.match(name or ""):
-        raise Bad("template name 不合法")
+        raise Bad("invalid template name")
     real = find_template_file(name)
     if not real:
-        raise Bad("template 不存在：" + name)
+        raise Bad("no such template: " + name)
     try:
         with open(real, "r", encoding="utf-8") as fh:
             doc = yaml.safe_load(fh)
     except yaml.YAMLError as exc:
-        raise Bad("template YAML 解析失败：%s（%s）" % (name, exc))
+        raise Bad("template %s is not valid YAML: %s" % (name, exc))
     except OSError as exc:
-        raise Bad("template 读取失败：%s（%s）" % (name, exc))
+        raise Bad("cannot read template %s: %s" % (name, exc))
     if not isinstance(doc, dict):
-        raise Bad("template 必须是 YAML mapping：" + name)
+        raise Bad("template must be a YAML mapping: " + name)
     tpl = {}
     for key, val in doc.items():
         if key not in TPL_KEYS:
-            raise Bad("template 含有未知字段：" + str(key))
+            raise Bad("template has an unknown field: " + str(key))
         if isinstance(val, bool) or not isinstance(val, (str, int, float)):
-            raise Bad("template 字段必须是纯量：" + str(key))
+            raise Bad("template field must be a scalar: " + str(key))
         tpl[str(key)] = str(val).strip()
     for req in ("image",):
         if not tpl.get(req):
-            raise Bad("template 缺少必填字段：" + req)
+            raise Bad("template is missing a required field: " + req)
     if not NAME_RE.match(tpl.get("name", name)):
-        raise Bad("template 内 name 不合法")
+        raise Bad("invalid name inside template")
     img = tpl["image"]
     if not ALLOW_TAGS and not DIGEST_RE.search(img):
-        raise Bad("template image 必须带 @sha256: digest（可用 DCA_ALLOW_TAGS=1 放宽）")
+        raise Bad("template image must pin @sha256: digest (set DCA_ALLOW_TAGS=1 to relax)")
     tpl.setdefault("workdir", "/workspace")
     tpl.setdefault("network", DEFAULT_NETWORK)
     if tpl["network"] not in ("", "default") and not NET_RE.match(tpl["network"]):
-        raise Bad("template network 不合法：" + tpl["network"])
+        raise Bad("invalid template network: " + tpl["network"])
     tpl.setdefault("cpus", "2")
     tpl.setdefault("memory", "4g")
     tpl.setdefault("pids", "512")
     tpl.setdefault("user", "1000:1000")
     if not tpl["workdir"].startswith("/"):
-        raise Bad("template workdir 必须是绝对路径")
+        raise Bad("template workdir must be an absolute path")
     tpl["_file"] = os.path.basename(real)
     return tpl
 
@@ -173,7 +179,7 @@ def docker(args, timeout=120, check=True):
     cmd = [DOCKER] + args
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if check and proc.returncode != 0:
-        raise Bad("docker 失败：%s" % (proc.stderr.strip() or proc.stdout.strip()))
+        raise Bad("docker failed: %s" % (proc.stderr.strip() or proc.stdout.strip()))
     return proc
 
 
@@ -183,7 +189,7 @@ def cname(task):
 
 def require_task(task):
     if not NAME_RE.match(task or ""):
-        raise Bad("task 不合法")
+        raise Bad("invalid task name")
     return task
 
 
@@ -191,7 +197,7 @@ def work_path(task, sub=""):
     base = os.path.realpath(WORK_ROOT)
     path = os.path.realpath(os.path.join(base, task, sub))
     if not (path == os.path.join(base, task) or path.startswith(os.path.join(base, task) + os.sep)):
-        raise Bad("路径越界")
+        raise Bad("path escapes the task workspace")
     return path
 
 
@@ -217,11 +223,11 @@ def require_container(task):
     proc = docker(["ps", "-a", "--filter", "name=^%s$" % cname(task),
                    "--filter", "label=devbox.owner=" + OWNER, "--format", "{{.Names}}"], check=False)
     if not proc.stdout.strip():
-        raise Bad("找不到属于本 owner 的容器：" + task)
+        raise Bad("no container owned by this owner for task: " + task)
     return cname(task)
 
 
-# ---------------------------------------------------------------- 动作
+# ------------------------------------------------------------- actions
 
 def do_create(payload):
     task = require_task(payload.get("task", ""))
@@ -236,11 +242,11 @@ def do_create(payload):
             "(or run ./setup.sh)."
             % (work, os.getuid(), exc, WORK_ROOT, os.getuid(), os.getgid(), WORK_ROOT)
         )
-    os.chmod(work, 0o777)  # C 以非 root uid 跑；bind mount 沿用宿主 ownership，只放开该 task 目录
+    os.chmod(work, 0o777)  # devbox runs as a non-root uid; open just this task dir
     existing = docker(["ps", "-a", "--filter", "name=^%s$" % cname(task),
                        "--format", "{{.Names}}"], check=False).stdout.strip()
     if existing:
-        raise Bad("task 已存在：" + task)
+        raise Bad("task already exists: " + task)
     args = [
         "run", "-d", "--name", cname(task),
         "--label", "devbox.owner=" + OWNER,
@@ -270,21 +276,21 @@ def do_exec(task, payload):
     require_container(task)
     cmd = payload.get("cmd")
     if not isinstance(cmd, list) or not cmd or not all(isinstance(c, str) for c in cmd):
-        raise Bad("cmd 必须是字符串数组")
+        raise Bad("cmd must be a non-empty array of strings")
     if len(cmd) > 64:
-        raise Bad("cmd 太长")
+        raise Bad("cmd is too long")
     args = ["exec"]
     wd = payload.get("workdir")
     if wd:
         if not wd.startswith("/"):
-            raise Bad("workdir 必须是绝对路径")
+            raise Bad("workdir must be an absolute path")
         args += ["-w", wd]
     args += ["-e", "TERM=dumb", cname(task)] + cmd
     timeout = min(int(payload.get("timeout", EXEC_TIMEOUT)), EXEC_TIMEOUT)
     try:
         proc = subprocess.run([DOCKER] + args, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise Bad("exec 逾时（%ss）" % timeout)
+        raise Bad("exec timed out after %ss" % timeout)
     touch(task)
     return {"rc": proc.returncode,
             "stdout": proc.stdout[-200000:],
@@ -293,13 +299,13 @@ def do_exec(task, payload):
 
 def check_url(url):
     if not isinstance(url, str) or len(url) > 2000:
-        raise Bad("url 不合法")
+        raise Bad("invalid url")
     parsed = urlparse(url)
     if parsed.scheme not in ("https", "ssh"):
-        raise Bad("只允许 https:// 或 ssh://（git:// file:// 一律禁止）")
+        raise Bad("only https:// and ssh:// are allowed (git:// and file:// are refused)")
     host = parsed.hostname or ""
     if not host:
-        raise Bad("url 缺少 host")
+        raise Bad("url has no host")
     if parsed.scheme == "https" and not ALLOW_PRIVATE_URL:
         try:
             ip = ipaddress.ip_address(host)
@@ -307,14 +313,14 @@ def check_url(url):
             ip = None
         if ip is not None and (ip.is_private or ip.is_loopback or ip.is_link_local
                                or ip.is_reserved or ip.is_multicast):
-            raise Bad("禁止内网地址")
+            raise Bad("private, loopback and link-local hosts are refused")
         if host.lower() in ("localhost", "localhost.localdomain"):
-            raise Bad("禁止内网地址")
+            raise Bad("private, loopback and link-local hosts are refused")
     return url
 
 
 def relax_perms(root):
-    """把新写入的目录/文件放开到 a+rwX，避免 controller uid 与 devbox user 不同时写不进去。"""
+    """Open new files/dirs to a+rwX so a devbox running as another uid can still write."""
     try:
         for dirpath, dirnames, filenames in os.walk(root):
             os.chmod(dirpath, 0o777)
@@ -328,23 +334,46 @@ def relax_perms(root):
         pass
 
 
+GIT_HELPER = (
+    "!f() { echo username=\\${DCA_GIT_USER:-x-access-token}; "
+    "echo password=\\${DCA_GIT_TOKEN}; }; f"
+)
+
+
+def git_env():
+    """Environment for git: no prompting; token exposed to the helper via env only."""
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = "/bin/true"
+    if GIT_TOKEN:
+        env["DCA_GIT_TOKEN"] = GIT_TOKEN
+        env["DCA_GIT_USER"] = GIT_USER
+    return env
+
+
+def git_args(*args):
+    """Prefix git arguments with credential config when a token is configured."""
+    if not GIT_TOKEN:
+        return ["git"] + list(args)
+    return ["git", "-c", "credential.helper=",
+            "-c", "credential.helper=" + GIT_HELPER] + list(args)
+
+
 def do_clone(task, payload):
     require_container(task)
     url = check_url(payload.get("url"))
     sub = payload.get("dir", "")
     if sub and not NAME_RE.match(sub):
-        raise Bad("dir 不合法")
+        raise Bad("invalid dir")
     dest = work_path(task, sub or os.path.basename(urlparse(url).path).removesuffix(".git") or "repo")
     if os.path.exists(dest) and os.listdir(dest):
-        raise Bad("目标目录非空：" + dest)
+        raise Bad("target directory is not empty: " + dest)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    env = dict(os.environ)
-    env.setdefault("GIT_TERMINAL_PROMPT", "0")
-    proc = subprocess.run(["git", "clone", "--", url, dest], capture_output=True,
-                          text=True, timeout=600, env=env)
+    proc = subprocess.run(git_args("clone", "--", url, dest), capture_output=True,
+                          text=True, timeout=600, env=git_env())
     touch(task)
     if proc.returncode != 0:
-        raise Bad("clone 失败：" + (proc.stderr.strip()[-2000:] or "unknown"))
+        raise Bad("git clone failed: " + (proc.stderr.strip()[-2000:] or "unknown"))
     relax_perms(dest)
     return {"path": dest, "rel": os.path.relpath(dest, work_path(task))}
 
@@ -354,14 +383,12 @@ def do_push(task, payload):
     sub = payload.get("dir", "")
     dest = work_path(task, sub) if sub else work_path(task)
     if not os.path.isdir(os.path.join(dest, ".git")):
-        raise Bad("不是 git 仓库：" + dest)
-    env = dict(os.environ)
-    env.setdefault("GIT_TERMINAL_PROMPT", "0")
-    proc = subprocess.run(["git", "-C", dest, "push"], capture_output=True, text=True,
-                          timeout=600, env=env)
+        raise Bad("not a git repository: " + dest)
+    proc = subprocess.run(git_args("-C", dest, "push"), capture_output=True, text=True,
+                          timeout=600, env=git_env())
     touch(task)
     if proc.returncode != 0:
-        raise Bad("push 失败：" + (proc.stderr.strip()[-2000:] or "unknown"))
+        raise Bad("git push failed: " + (proc.stderr.strip()[-2000:] or "unknown"))
     relax_perms(dest)
     return {"stdout": proc.stdout[-5000:], "stderr": proc.stderr[-5000:]}
 
@@ -385,7 +412,7 @@ def touch(task):
         _last_used[task] = time.time()
 
 
-# ---------------------------------------------------------------- 回收
+# -------------------------------------------------------------- reaper
 
 def reaper():
     if IDLE_HOURS <= 0:
@@ -433,16 +460,16 @@ class Handler(BaseHTTPRequestHandler):
     def _body(self):
         n = int(self.headers.get("Content-Length") or 0)
         if n > 1_000_000:
-            raise Bad("body 太大")
+            raise Bad("request body is too large")
         raw = self.rfile.read(n) if n else b""
         if not raw:
             return {}
         try:
             obj = json.loads(raw)
         except json.JSONDecodeError:
-            raise Bad("body 不是合法 JSON")
+            raise Bad("request body is not valid JSON")
         if not isinstance(obj, dict):
-            raise Bad("body 必须是 JSON object")
+            raise Bad("request body must be a JSON object")
         return obj
 
     def _route(self, method):
@@ -464,7 +491,7 @@ class Handler(BaseHTTPRequestHandler):
                 parts = path.split("/")
                 # /v1/tasks/<task>/<action>
                 if len(parts) != 5:
-                    raise Bad("路径不支持")
+                    raise Bad("unsupported path")
                 task, action = require_task(parts[3]), parts[4]
                 if action == "exec":
                     self._send(200, do_exec(task, payload))
@@ -475,11 +502,11 @@ class Handler(BaseHTTPRequestHandler):
                 elif action == "stop":
                     self._send(200, do_stop(task))
                 else:
-                    raise Bad("未知 action：" + action)
+                    raise Bad("unknown action: " + action)
             elif method == "DELETE" and path.startswith("/v1/tasks/"):
                 parts = path.split("/")
                 if len(parts) != 4:
-                    raise Bad("路径不支持")
+                    raise Bad("unsupported path")
                 self._send(200, do_rm(require_task(parts[3])))
             else:
                 self._send(404, {"error": "not found"})
@@ -502,10 +529,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     if not TOKEN or len(TOKEN) < 16:
-        print("DCA_TOKEN 未设置或长度 <16，拒绝启动", file=sys.stderr)
+        print("DCA_TOKEN is missing or shorter than 16 characters; refusing to start", file=sys.stderr)
         return 2
     if not shutil.which(DOCKER):
-        print("找不到 docker CLI", file=sys.stderr)
+        print("docker CLI not found on PATH", file=sys.stderr)
         return 2
     try:
         os.makedirs(WORK_ROOT, exist_ok=True)

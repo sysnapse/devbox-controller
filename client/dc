@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-dc —— agent 侧客户端（架构中的 A 里跑的 shell 入口）。
+dc - the agent-side client (the shell entry point that runs inside the agent).
 
-零依赖，只用标准库。所有动作都是「点名模板 + 传最小参数」，
-没有任何参数可以变成 docker flag。
+Zero dependencies, standard library only. Every action is "name a template plus the
+smallest possible arguments";
+no argument can turn into a docker flag.
 
-用法：
+Usage:
   dc health
   dc templates
   dc tasks
@@ -16,11 +17,11 @@ dc —— agent 侧客户端（架构中的 A 里跑的 shell 入口）。
   dc stop <task>
   dc rm <task>
 
-环境变量：
-  DCA_URL    不设就自动探测：http://<本机默认网关>:47123 → http://172.17.0.1:47123
-             → http://127.0.0.1:47123（host 网络时用）
-  DCA_PORT   默认 47123，用于拼探测地址
-  DCA_TOKEN  必填
+Environment:
+  DCA_URL    Autodetected when unset: http://<this host default gateway>:47123,
+             then http://172.17.0.1:47123, then http://127.0.0.1:47123 (host network).
+  DCA_PORT   Probe port, default 47123
+  DCA_TOKEN  Required (DEVBOX_TOKEN is accepted as a fallback)
 """
 
 import json
@@ -33,7 +34,7 @@ PORT = os.environ.get("DCA_PORT", "47123")
 
 
 def default_gateway():
-    """读出本容器所在的网关（宿主）。不写死 172.17.0.1：agent 可能跑在自建 bridge 上。"""
+    """Gateway of the bridge this container sits on. Not hardcoded to 172.17.0.1."""
     try:
         with open("/proc/net/route", encoding="utf-8") as fh:
             for line in fh.readlines()[1:]:
@@ -47,21 +48,21 @@ def default_gateway():
     return ""
 
 
-# 探测顺序：真实默认网关（本机实际所在 bridge 的宿主）→ 172.17.0.1（docker0 惯例）→ loopback
+# Probe order: real default gateway, then 172.17.0.1 (docker0 convention), then loopback.
 CANDIDATES = [
     os.environ.get("DCA_URL", "").rstrip("/"),
     ("http://" + default_gateway() + ":" + PORT) if default_gateway() else "",
     "http://172.17.0.1:" + PORT,
     "http://127.0.0.1:" + PORT,
 ]
-TOKEN = os.environ.get("DCA_TOKEN", "")
+TOKEN = os.environ.get("DCA_TOKEN", "") or os.environ.get("DEVBOX_TOKEN", "")
 URL = None
 
 USAGE = __doc__.strip()
 
 
 def resolve():
-    """从候选地址里找第一个回应 health 的。"""
+    """Return the first candidate address that answers health."""
     global URL
     if URL:
         return URL
@@ -81,16 +82,16 @@ def resolve():
                 errs.append("%s -> HTTP %s" % (cand, resp.status))
         except urllib.error.HTTPError as exc:
             if exc.code == 401:
-                die("controller 有回应（%s）但 token 不对：HTTP 401" % cand)
+                die("controller answered at %s but the token is wrong: HTTP 401" % cand)
             errs.append("%s -> HTTP %s" % (cand, exc.code))
         except Exception as exc:  # noqa: BLE001
             errs.append("%s -> %s" % (cand, exc))
-    die("找不到 controller，已试：" + "；".join(errs) + "。可用 DCA_URL 指定")
+    die("no controller found, tried: " + "; ".join(errs) + ". Set DCA_URL to point at one")
 
 
 def call(method, path, payload=None, timeout=960):
     if not TOKEN:
-        die("DCA_TOKEN 未设置")
+        die("DCA_TOKEN is not set")
     base = resolve()
     data = None
     headers = {"Authorization": "Bearer " + TOKEN}
@@ -108,7 +109,7 @@ def call(method, path, payload=None, timeout=960):
             body = {"error": str(exc)}
         return exc.code, body
     except urllib.error.URLError as exc:
-        die("连不上 controller（%s）：%s" % (base, exc.reason))
+        die("cannot reach controller at %s: %s" % (base, exc.reason))
 
 
 def die(msg):
@@ -118,7 +119,7 @@ def die(msg):
 
 def need(args, n, usage):
     if len(args) < n:
-        die("参数不足。用法：" + usage)
+        die("not enough arguments. usage: " + usage)
 
 
 def main(argv):
@@ -143,7 +144,7 @@ def main(argv):
             return 1
         for t in body.get("templates", []):
             if "error" in t:
-                print("%-16s  [坏模板] %s" % (t.get("name", "?"), t["error"]))
+                print("%-16s  [broken template] %s" % (t.get("name", "?"), t["error"]))
             else:
                 print("%-16s %-12s cpu=%-3s mem=%-5s net=%s" % (
                     t["name"], (t["image"].split("@")[0])[-24:], t["cpus"], t["memory"], t["network"]))
@@ -156,7 +157,7 @@ def main(argv):
             return 1
         rows = body.get("tasks", [])
         if not rows:
-            print("(无任务)")
+            print("(no tasks)")
         for r in rows:
             print("%-24s %-16s %s" % (r["task"], r["template"], r["status"]))
         return 0
@@ -174,7 +175,7 @@ def main(argv):
         if rest and rest[0] == "--":
             rest = rest[1:]
         if not rest:
-            die("缺少要执行的命令")
+            die("no command given to exec")
         code, body = call("POST", "/v1/tasks/%s/exec" % task, {"cmd": rest})
         if code >= 400:
             print("dc: " + body.get("error", "error"), file=sys.stderr)
@@ -213,7 +214,7 @@ def main(argv):
         print(json.dumps(body, ensure_ascii=False))
         return 0 if code < 400 else 1
 
-    die("未知子命令：" + cmd)
+    die("unknown subcommand: " + cmd)
 
 
 if __name__ == "__main__":

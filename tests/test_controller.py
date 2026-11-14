@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""dca controller 单元测试（不需要 docker daemon）。"""
+"""dca controller unit tests (no docker daemon needed)."""
 
 import importlib.util
 import os
@@ -50,105 +50,118 @@ def setup():
 
 def main():
     mod, tmp, work = setup()
-    print("template 校验")
-    check("拒绝不存在的模板", raises(lambda: mod.load_template("nope"), mod.Bad))
-    check("拒绝 tag（无 digest）", raises(lambda: mod.load_template("tagged"), mod.Bad))
-    check("拒绝未知字段 privileged", raises(lambda: mod.load_template("evil"), mod.Bad))
+    print("template validation")
+    check("reject unknown template", raises(lambda: mod.load_template("nope"), mod.Bad))
+    check("reject tag without digest", raises(lambda: mod.load_template("tagged"), mod.Bad))
+    check("reject unknown field privileged", raises(lambda: mod.load_template("evil"), mod.Bad))
     t = mod.load_template("good")
-    check("接受合规模板", t["name"] == "good")
+    check("accept a valid template", t["name"] == "good")
 
-    print("路径校验")
-    check("拒绝 .. 越界", raises(lambda: mod.work_path("good", "../../etc"), mod.Bad))
-    check("拒绝绝对路径逃逸", raises(lambda: mod.work_path("good", "/etc/passwd"), mod.Bad))
+    print("path checks")
+    check("reject .. traversal", raises(lambda: mod.work_path("good", "../../etc"), mod.Bad))
+    check("reject absolute-path escape", raises(lambda: mod.work_path("good", "/etc/passwd"), mod.Bad))
 
-    print("URL 校验")
-    check("拒绝 file://", raises(lambda: mod.check_url("file:///etc/passwd"), mod.Bad))
-    check("拒绝 git://", raises(lambda: mod.check_url("git://x/y"), mod.Bad))
-    check("拒绝 127.0.0.1", raises(lambda: mod.check_url("https://127.0.0.1/a.git"), mod.Bad))
-    check("拒绝 169.254.169.254", raises(lambda: mod.check_url("https://169.254.169.254/a.git"), mod.Bad))
-    check("拒绝 20.x 内网", raises(lambda: mod.check_url("https://192.168.20.100/a.git"), mod.Bad))
-    check("接受 github", mod.check_url("https://github.com/a/b.git").startswith("https://"))
+    print("url checks")
+    check("reject file://", raises(lambda: mod.check_url("file:///etc/passwd"), mod.Bad))
+    check("reject git://", raises(lambda: mod.check_url("git://x/y"), mod.Bad))
+    check("reject 127.0.0.1", raises(lambda: mod.check_url("https://127.0.0.1/a.git"), mod.Bad))
+    check("reject 169.254.169.254", raises(lambda: mod.check_url("https://169.254.169.254/a.git"), mod.Bad))
+    check("reject a 20.x private host", raises(lambda: mod.check_url("https://192.168.20.100/a.git"), mod.Bad))
+    check("accept github.com", mod.check_url("https://github.com/a/b.git").startswith("https://"))
 
-    print("创建容器参数")
+    print("create arguments")
     mod.docker = lambda args, **kw: runcapture(mod, args, **kw)
     log = []
     mod.docker = lambda args, timeout=120, check=True: capture(log, args)
     res = mod.do_create({"template": "good", "task": "demo"})
     args = next(a for a in log if a[0] == "run")
     joined = " ".join(args)
-    check("创建成功并返回路径", res["task"] == "demo" and res["template"] == "good")
-    check("含 --cap-drop=ALL", "--cap-drop=ALL" in joined)
-    check("含 no-new-privileges", "no-new-privileges" in joined)
-    check("不含 privileged", "privileged" not in joined)
-    check("不含 docker.sock 挂载", "docker.sock" not in joined)
-    check("含资源限制", "--pids-limit" in joined and "--memory" in joined and "--cpus" in joined)
-    check("绑定 workspace", "-v" in args and str(work / "demo") in joined)
-    check("带 owner label", "devbox.owner=agent" in joined)
-    check("默认不传 --network（不需要 create network）", "--network" not in joined)
+    check("creates and returns the host path", res["task"] == "demo" and res["template"] == "good")
+    check("has --cap-drop=ALL", "--cap-drop=ALL" in joined)
+    check("has no-new-privileges", "no-new-privileges" in joined)
+    check("no privileged flag", "privileged" not in joined)
+    check("no docker.sock mount", "docker.sock" not in joined)
+    check("has resource limits", "--pids-limit" in joined and "--memory" in joined and "--cpus" in joined)
+    check("binds the workspace", "-v" in args and str(work / "demo") in joined)
+    check("carries the owner label", "devbox.owner=agent" in joined)
+    check("no --network by default (no network created)", "--network" not in joined)
 
-    print("网络字段")
+    print("network field")
     tpldir = pathlib.Path(mod.TEMPLATES_DIR)
     (tpldir / "nonet.yml").write_text(
         "name: nonet\nimage: alpine@sha256:" + "c" * 64 + "\nnetwork: none\n")
     mod.do_create({"template": "nonet", "task": "netdemo"})
     netargs = " ".join(log[-1])
-    check("network: none 会传 --network none", "--network none" in netargs)
+    check("network: none passes --network none", "--network none" in netargs)
     (tpldir / "badnet.yml").write_text(
         "name: badnet\nimage: alpine@sha256:" + "d" * 64 + "\nnetwork: 'host; rm -rf /'\n")
-    check("拒绝非法 network 名", raises(lambda: mod.load_template("badnet"), mod.Bad))
+    check("reject an invalid network name", raises(lambda: mod.load_template("badnet"), mod.Bad))
 
-    print("拒绝 agent 传任意 docker flag")
+    print("agent cannot pass arbitrary docker flags")
     try:
         mod.do_create({"template": "good", "task": "demo", "privileged": True, "runArgs": ["--privileged"]})
-        check("忽略未知字段（不进入 docker args）", "privileged" not in " ".join(next(a for a in log if a[0] == "run")))
+        check("unknown fields never reach docker args", "privileged" not in " ".join(next(a for a in log if a[0] == "run")))
     except mod.Bad:
-        check("未知字段被拒或忽略", True)
+        check("unknown field is rejected or ignored", True)
 
-    print("task 名注入")
-    check("拒绝含 / 的 task", raises(lambda: mod.do_create({"template": "good", "task": "a/b"}), mod.Bad))
-    check("拒绝含 .. 的 task", raises(lambda: mod.do_create({"template": "good", "task": ".."}), mod.Bad))
-    check("拒绝大写 task", raises(lambda: mod.do_create({"template": "good", "task": "Demo"}), mod.Bad))
+    print("task name injection")
+    check("reject a task containing a slash", raises(lambda: mod.do_create({"template": "good", "task": "a/b"}), mod.Bad))
+    check("reject a task containing ..", raises(lambda: mod.do_create({"template": "good", "task": ".."}), mod.Bad))
+    check("reject an uppercase task", raises(lambda: mod.do_create({"template": "good", "task": "Demo"}), mod.Bad))
 
-    print("exec 参数")
-    check("拒绝空 cmd", raises(lambda: mod.do_exec("demo", {"cmd": []}), mod.Bad))
-    check("拒绝字符串 cmd（防命令注入）", raises(lambda: mod.do_exec("demo", {"cmd": "rm -rf /"}), mod.Bad))
-    check("拒绝相对 workdir", raises(lambda: mod.do_exec("demo", {"cmd": ["ls"], "workdir": "etc"}), mod.Bad))
+    print("exec arguments")
+    check("reject an empty cmd", raises(lambda: mod.do_exec("demo", {"cmd": []}), mod.Bad))
+    check("reject a string cmd (injection)", raises(lambda: mod.do_exec("demo", {"cmd": "rm -rf /"}), mod.Bad))
+    check("reject a relative workdir", raises(lambda: mod.do_exec("demo", {"cmd": ["ls"], "workdir": "etc"}), mod.Bad))
 
-    print("YAML 模板解析")
+    print("YAML template parsing")
     tpldir = tpl = pathlib.Path(mod.TEMPLATES_DIR)
     (tpl / "nested.yml").write_text(
         "name: nested\nimage: alpine@sha256:" + "c" * 64 + "\nresources:\n  cpus: 2\n")
-    check("拒绝嵌套 mapping（只收纯量）",
+    check("reject nested mapping (scalars only)",
           raises(lambda: mod.load_template("nested"), mod.Bad))
     (tpl / "broken.yml").write_text("name: broken\nimage: [unclosed\n")
-    check("拒绝坏 YAML", raises(lambda: mod.load_template("broken"), mod.Bad))
+    check("reject broken YAML", raises(lambda: mod.load_template("broken"), mod.Bad))
     (tpl / "list.yml").write_text("- name: x\n- image: y\n")
-    check("拒绝非 mapping 的 YAML", raises(lambda: mod.load_template("list"), mod.Bad))
+    check("reject a non-mapping YAML", raises(lambda: mod.load_template("list"), mod.Bad))
     (tpl / "boolval.yml").write_text(
         "name: boolval\nimage: alpine@sha256:" + "d" * 64 + "\nuser: true\n")
-    check("拒绝 boolean 值（防 true/yes 误解析）",
+    check("reject booleans (true/yes traps)",
           raises(lambda: mod.load_template("boolval"), mod.Bad))
     (tpl / "num.yml").write_text(
         "name: num\nimage: alpine@sha256:" + "e" * 64 + "\ncpus: 4\nmemory: 2g\n")
     nt = mod.load_template("num")
-    check("YAML 整数转成字符串", nt["cpus"] == "4" and nt["memory"] == "2g")
-    # 旧 .tpl 仍可读，但同名 .yml 优先
+    check("YAML integer becomes a string", nt["cpus"] == "4" and nt["memory"] == "2g")
+    # legacy .tpl is still readable, but .yml wins on a clash
     (tpl / "legacy.tpl").write_text(
         "name: legacy\nimage: alpine@sha256:" + "f" * 64 + "\n")
-    check("旧的 .tpl 仍然可读", mod.load_template("legacy")["name"] == "legacy")
+    check("legacy .tpl is still readable", mod.load_template("legacy")["name"] == "legacy")
     (tpl / "both.tpl").write_text(
         "name: fromtpl\nimage: alpine@sha256:" + "a" * 64 + "\n")
     (tpl / "both.yml").write_text(
         "name: fromyml\nimage: alpine@sha256:" + "b" * 64 + "\n")
-    check("同名时 .yml 优先", mod.load_template("both")["name"] == "fromyml")
+    check(".yml wins on a name clash", mod.load_template("both")["name"] == "fromyml")
     names = [x.get("name") for x in mod.list_templates()]
-    check("list_templates 不重复", names.count("fromyml") == 1 and "fromtpl" not in names)
+    check("list_templates does not duplicate", names.count("fromyml") == 1 and "fromtpl" not in names)
 
-    print("结果")
+    print("git credentials")
+    mod.GIT_TOKEN = "k" * 32
+    mod.GIT_USER = "bot"
+    gargs = mod.git_args("clone", "--", "https://github.com/a/b.git", "/tmp/x")
+    check("git_args adds a credential helper",
+          any(a.startswith("credential.helper=") and a.endswith("}; f") for a in gargs))
+    check("token never appears in argv", not any("k" * 32 in a for a in gargs))
+    genv = mod.git_env()
+    check("token only via env", genv.get("DCA_GIT_TOKEN") == "k" * 32)
+    check("no prompting", genv.get("GIT_TERMINAL_PROMPT") == "0")
+    mod.GIT_TOKEN = ""
+    check("no helper without a token",
+          mod.git_args("clone", "--", "u", "d") == ["git", "clone", "--", "u", "d"])
+    print("result")
     if failures:
-        print("%d 项失败：%s" % (len(failures), ", ".join(failures)))
+        print("%d failed: %s" % (len(failures), ", ".join(failures)))
         return 1
-    print("全部通过")
+    print("all passed")
     return 0
 
 

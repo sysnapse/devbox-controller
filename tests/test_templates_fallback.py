@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""空挂载目录时，内置模板副本（/opt/templates 之类的 fallback）必须仍然可用。
+"""With an empty mount, the baked-in template copy must still be available.
 
-回归场景（2026-11-15 实测遇到）：compose 在 ~/workspaces/dca 构建，
-但挂载的 ./templates 在运行目录不存在 → 容器内 /templates 为空
-→ GET /v1/templates 回 []，所有 devbox 都建不出来。
+Regression scene (hit in a live run on 2026-11-15): compose builds in ~/workspaces/dca
+but the mounted ./templates does not exist in the run directory, so /templates inside
+the container is empty: GET /v1/templates returns [] and no devbox can be created.
 """
 import importlib.util
 import os
@@ -41,18 +41,18 @@ os.environ.update({
 spec.loader.exec_module(mod)
 
 names = {t.get("name") for t in mod.list_templates()}
-check("空挂载目录时仍列出内置模板", "node22" in names)
-check("挂载目录的模板也在", "override" in names)
-check("load_template 能走 fallback", mod.load_template("node22")["image"].endswith("a" * 64))
+check("built-in templates listed with an empty mount", "node22" in names)
+check("mounted templates are listed too", "override" in names)
+check("load_template falls back", mod.load_template("node22")["image"].endswith("a" * 64))
 
 missing_fb = tmp / "does-not-exist"
 mod.TEMPLATES_FALLBACK = str(missing_fb)
-check("fallback 不存在时不炸", {t.get("name") for t in mod.list_templates()} == {"override"})
+check("no crash when the fallback is missing", {t.get("name") for t in mod.list_templates()} == {"override"})
 try:
     mod.load_template("node22")
-    check("fallback 不存在时报 template 不存在", False)
+    check("missing fallback reports no such template", False)
 except mod.Bad as exc:
-    check("fallback 不存在时报 template 不存在", "template 不存在" in str(exc))
+    check("missing fallback reports no such template", "no such template" in str(exc))
 
-print("全部通过" if not fails else "失败：" + ", ".join(fails))
+print("all passed" if not fails else "failed: " + ", ".join(fails))
 raise SystemExit(0 if not fails else 1)

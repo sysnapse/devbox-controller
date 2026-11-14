@@ -190,11 +190,32 @@ user: "1000:1000"
 
 ### Built-in copies (why the API is never template-less)
 
-The image also carries a copy of `templates/` at `/opt/templates`. Resolution order is the mounted directory first, then the built-in copy. This exists because of a real failure: if `docker compose` is started from a directory where `./templates` does not exist, Docker creates an *empty* directory for the bind mount, the controller then reports `[]` templates, and every `dc new` fails with `template 不存在`.
+The image also carries a copy of `templates/` at `/opt/templates`. Resolution order is the mounted directory first, then the built-in copy. This exists because of a real failure: if `docker compose` is started from a directory where `./templates` does not exist, Docker creates an *empty* directory for the bind mount, the controller then reports `[]` templates, and every `dc new` fails with `no such template`.
 
 The build context is therefore the repository root (`context: .`, `dockerfile: controller/Dockerfile`), not `./controller`. If you edit `templates/*.yml`, rebuild with `docker compose up -d --build`; a plain restart will not refresh the built-in copies.
 
 `templates/base.yml` is the only template that should ever need editing for local mirrors; keep the digest lines intact.
+
+## Git credentials (why the token never reaches the devbox)
+
+`clone` and `push` run **on the host**, inside the controller process, not in the devbox.
+If `DCA_GIT_TOKEN` is set, every git call is prefixed with an inline credential helper and
+`GIT_TERMINAL_PROMPT=0`:
+
+```sh
+git -c credential.helper= \
+    -c 'credential.helper=!f() { echo username=${DCA_GIT_USER}; echo password=${DCA_GIT_TOKEN}; }; f' \
+    clone -- <url> <dest>
+```
+
+- The token travels in the **environment of the controller process**: not in argv, not in
+  `.git/config`, and never inside a devbox image or its filesystem.
+- The devbox only sees ordinary files. A task that needs `git push` asks the controller,
+  and the controller pushes the working copy from the host.
+- Without a token only public repositories clone, and `push` fails with a normal git
+  authentication error.
+- Use a fine-grained PAT limited to the target repository with `contents: write`.
+  A classic token carrying org/admin scopes is overkill and widens the blast radius of a leak.
 
 ## Narrowing egress (optional, not built in)
 
@@ -223,6 +244,8 @@ Devboxes still need the public internet for `git clone` and package installs, so
 | `DCA_IDLE_HOURS` | `0` | If > 0, periodically stop idle tasks |
 | `DCA_ALLOW_TAGS` | `0` | Allow image tags instead of digests (not recommended) |
 | `DCA_ALLOW_PRIVATE_URL` | `0` | Allow cloning private/internal URLs (not recommended) |
+| `DCA_GIT_TOKEN` | empty | Optional host-side git token for clone/push; never enters a devbox |
+| `DCA_GIT_USER` | `x-access-token` | Username paired with `DCA_GIT_TOKEN` |
 
 ## What has been tested
 
