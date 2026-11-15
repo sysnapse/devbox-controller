@@ -37,6 +37,9 @@ services:
       DCA_OWNER: "${DCA_OWNER:-agent}"
       DCA_EXEC_TIMEOUT: "${DCA_EXEC_TIMEOUT:-900}"
       DCA_IDLE_HOURS: "${DCA_IDLE_HOURS:-0}"
+      # Hard cap on simultaneously running devboxes; 1 = one job at a time.
+      # 0 or negative disables the cap.
+      DCA_MAX_TASKS: "${DCA_MAX_TASKS:-1}"
       DCA_ALLOW_TAGS: "${DCA_ALLOW_TAGS:-0}"
       DCA_ALLOW_PRIVATE_URL: "${DCA_ALLOW_PRIVATE_URL:-0}"
       # Optional git credentials for dc clone only. The token stays on this side and is
