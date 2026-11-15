@@ -17,7 +17,7 @@ flowchart LR
     agent -- "HTTP + Bearer token" --> gw
     gw --> ctrl
     ctrl -- "docker run, fully fixed flags" --> dbx
-    ctrl -- "git clone / git push on the host" --> gh
+    ctrl -- "git clone on the host (read only)" --> gh
     agent -. "cannot reach: no socket, no creds" .-> dbx
 ```
 
@@ -52,8 +52,7 @@ sequenceDiagram
     Agent->>Ctrl: POST /v1/tasks/TASK/exec {cmd: [...]}
     Ctrl->>Dev: docker exec
     Dev-->>Agent: {stdout, stderr, exit_code}
-    Agent->>Ctrl: POST /v1/tasks/TASK/push {dir}
-    Ctrl->>GH: git push
+    Note over Agent,GH: push runs inside the devbox with the agent's own token
     Agent->>Ctrl: DELETE /v1/tasks/TASK
     Ctrl->>Dev: docker rm -f
 ```
@@ -161,7 +160,8 @@ dc new node22 task-001            # start an empty devbox
 dc exec task-001 -- git --version
 dc clone task-001 https://github.com/you/repo.git
 dc exec task-001 -- sh -lc 'cd repo && npm ci && npm test'
-dc push task-001 repo
+# push from inside the devbox, with your own token (never through the controller)
+dc exec task-001 -- sh -lc 'cd repo && git push -u origin HEAD'
 dc rm task-001
 ```
 
@@ -333,12 +333,13 @@ dc exec mytask -- sh -c 'cd repo && echo x >> f && git commit -am wip && git pus
 - Tools that want a token in the environment can `export GH_TOKEN=$(cat /etc/devbox-git-token)`.
 - `DCA_INJECT_GIT=0` turns all of this off, so the token stays on the controller side only.
 
-### 2. On the controller (`dc clone` / `dc push`)
+### 2. `dc clone` only, on the controller
 
-`dc clone <task> <url>` and `dc push <task> [dir]` run git **on the host** in the controller
-process. Useful when injecting is switched off, or when the working copy came from somewhere
-that is not a container shell. The token is passed to git through the process environment and
-an inline credential helper, never in argv and never in `.git/config`.
+`dc clone <task> <url> [dir]` runs `git clone` **on the host** in the controller process,
+which keeps a read token out of the devbox. There is **no `dc push`**: pushing is always
+done by the agent inside the devbox with the agent's own token, so a compromised devbox
+cannot borrow the controller's write credential. The token for clone is passed through the
+process environment and an inline credential helper, never in argv and never in `.git/config`.
 
 ```sh
 git -c credential.helper= \
@@ -346,19 +347,25 @@ git -c credential.helper= \
     clone -- <url> <dest>
 ```
 
-Without a token only public repositories clone, and `push` fails with a normal git
-authentication error.
+Without a token only public repositories clone.
 
 ### Scope the token, and know what the devbox can see
 
 Use a fine-grained PAT limited to the repositories the agent may touch, with `contents: write`.
 A classic token carrying org/admin scopes is overkill and widens the blast radius of a leak.
 
-Be honest about the trade: inside a devbox the token is readable by anything running in that
-devbox (env or file — same access either way). Devboxes share the default bridge with the agent
-container, so code you run there can also try to reach the agent. That is the cost of letting the
-agent run git itself instead of funnelling every push through the controller. If that is too
-much, set `DCA_INJECT_GIT=0` and only use `dc clone` / `dc push`.
+Be honest about the trade: a token you use inside a devbox is readable by anything running in
+that devbox (env or file — same access either way). Devboxes share the default bridge with the
+agent container, so code you run there can also try to reach the agent. The controller does not
+hold or relay a push credential at all, so the blast radius of a devbox is limited to the token
+that agent chose to bring, and to that run only.
+
+Push from the devbox like this, without writing the token to `.git/config`:
+
+```sh
+# token from your own environment, read inside the container
+dc exec task-001 -- sh -lc 'cd repo && git -c credential.helper="!f() { echo username=x-access-token; echo password=$GH_TOKEN; }; f" push -u origin HEAD'
+```
 
 ## Narrowing egress (optional, not built in)
 
@@ -387,7 +394,7 @@ Devboxes still need the public internet for `git clone` and package installs, so
 | `DCA_IDLE_HOURS` | `0` | If > 0, periodically stop idle tasks |
 | `DCA_ALLOW_TAGS` | `0` | Allow image tags instead of digests (not recommended) |
 | `DCA_ALLOW_PRIVATE_URL` | `0` | Allow cloning private/internal URLs (not recommended) |
-| `DCA_GIT_TOKEN` | empty | Git token for `dc clone`/`dc push`, and copied into each devbox when injection is on |
+| `DCA_GIT_TOKEN` | empty | Read token for `dc clone` only; copied into each devbox when injection is on. Not used for push |
 | `DCA_GIT_USER` | `x-access-token` | Username paired with `DCA_GIT_TOKEN` |
 | `DCA_INJECT_GIT` | `1` | Write identity, credential helper and token into each devbox; `0` keeps the token on the controller |
 | `DCA_GIT_NAME` / `DCA_GIT_EMAIL` | `sysnapse` / `8198069+sysnapse@users.noreply.github.com` | Commit identity inside devboxes |
