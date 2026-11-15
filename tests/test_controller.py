@@ -180,6 +180,31 @@ def main():
           mod.MAX_TASKS == 1 and mod.count_live() == 5)
     mod.docker = fake_ps("")
 
+    print("apt package install (cap-drop=ALL workarounds)")
+    logfile = pathlib.Path(os.environ["FAKE_LOG"])
+    os.environ["FAKE_PKG_MGR"] = "apt-get"
+    os.environ["FAKE_RC"] = "0"
+    seen = logfile.read_text() if logfile.exists() else ""
+    res = mod.install_packages("demo", ["git"])
+    calls = (logfile.read_text() if logfile.exists() else "")[len(seen):]
+    check("apt install reports ok", res.startswith("ok (apt-get: git)"), res)
+    check("apt fetch runs as root (no setgroups to _apt)",
+          "APT::Sandbox::User=root" in calls)
+    check("apt downloads into a root-created dir",
+          "Dir::Cache::archives=" in calls)
+    check("the root-owned cache dir is created first",
+          "mkdir -p" in calls and "/partial" in calls)
+    check("apt never writes the image's 0700 _apt partial dir",
+          "/var/cache/apt/archives/partial" not in calls)
+    os.environ["FAKE_RC"] = "1"
+    failed = mod.install_packages("demo", ["git"])
+    check("a failed apt install is reported, not swallowed",
+          failed.startswith("failed (apt-get)"), failed)
+    os.environ["FAKE_RC"] = "0"
+    os.environ["FAKE_PKG_MGR"] = "apk"
+    apk = mod.install_packages("demo", ["git", "make"])
+    check("apk path is untouched", apk == "ok (apk: git make)", apk)
+
     print("result")
     if failures:
         print("%d failed: %s" % (len(failures), ", ".join(failures)))
