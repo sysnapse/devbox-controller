@@ -45,7 +45,8 @@ EXEC_TIMEOUT = int(os.environ.get("DCA_EXEC_TIMEOUT", "900"))
 IDLE_HOURS = float(os.environ.get("DCA_IDLE_HOURS", "0"))
 ALLOW_TAGS = os.environ.get("DCA_ALLOW_TAGS", "0") == "1"
 ALLOW_PRIVATE_URL = os.environ.get("DCA_ALLOW_PRIVATE_URL", "0") == "1"
-# Optional git credentials for clone/push, kept on the host side only.
+# Optional git credentials for `dc clone` only, kept on the host side.
+# Pushing is the agent's job: it brings its own token inside the devbox.
 # The token never reaches the devbox: it is read from this process environment by
 # a git credential helper, so it never appears in argv or in a .git/config remote.
 GIT_TOKEN = os.environ.get("DCA_GIT_TOKEN", "")
@@ -55,8 +56,8 @@ GIT_NAME = os.environ.get("DCA_GIT_NAME", "sysnapse")
 GIT_EMAIL = os.environ.get("DCA_GIT_EMAIL",
                            "8198069+sysnapse@users.noreply.github.com")
 # Also install the identity and the token inside each devbox, so the agent can run
-# git clone/commit/push in the container itself. DCA_INJECT_GIT=0 keeps the token
-# on the controller side only (clone/push then has to go through `dc clone`/`dc push`).
+# git clone/commit/push in the container itself (the agent supplies its own token).
+# DCA_INJECT_GIT=0 keeps any host token on the controller side (read path only).
 INJECT_GIT = os.environ.get("DCA_INJECT_GIT", "1") == "1"
 # Binds 0.0.0.0 by default: the agent may sit on a bridge, where the only route in
 # is the bridge gateway. Authentication is the token, not the bind address.
@@ -527,21 +528,6 @@ def do_clone(task, payload):
     return {"path": dest, "rel": os.path.relpath(dest, work_path(task))}
 
 
-def do_push(task, payload):
-    require_container(task)
-    sub = payload.get("dir", "")
-    dest = work_path(task, sub) if sub else work_path(task)
-    if not os.path.isdir(os.path.join(dest, ".git")):
-        raise Bad("not a git repository: " + dest)
-    proc = subprocess.run(git_args("-C", dest, "push"), capture_output=True, text=True,
-                          timeout=600, env=git_env())
-    touch(task)
-    if proc.returncode != 0:
-        raise Bad("git push failed: " + (proc.stderr.strip()[-2000:] or "unknown"))
-    relax_perms(dest)
-    return {"stdout": proc.stdout[-5000:], "stderr": proc.stderr[-5000:]}
-
-
 def do_stop(task):
     require_container(task)
     docker(["stop", cname(task)], timeout=60, check=False)
@@ -646,8 +632,6 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, do_exec(task, payload))
                 elif action == "clone":
                     self._send(200, do_clone(task, payload))
-                elif action == "push":
-                    self._send(200, do_push(task, payload))
                 elif action == "stop":
                     self._send(200, do_stop(task))
                 else:
