@@ -322,8 +322,12 @@ def install_packages(task, pkgs):
     if mgr == "apk":
         script = "apk add --no-cache " + names
     elif mgr == "apt-get":
-        script = ("apt-get update -qq && DEBIAN_FRONTEND=noninteractive "
-                  "apt-get install -y -qq --no-install-recommends " + names +
+        # cap-drop=ALL drops CAP_SETGID, so apt's sandboxed fetch (setgroups to _apt)
+        # dies with "setgroups (1: Operation not permitted)". Run apt as root instead of
+        # weakening the container: -o APT::Sandbox::User=root.
+        APT = "apt-get -o APT::Sandbox::User=root "
+        script = (APT + "update -qq && DEBIAN_FRONTEND=noninteractive " +
+                  APT + "install -y -qq --no-install-recommends " + names +
                   " && rm -rf /var/lib/apt/lists/*")
     elif mgr == "dnf":
         script = "dnf install -y -q " + names + " && dnf clean all"
