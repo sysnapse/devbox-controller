@@ -39,13 +39,13 @@ services:
       DCA_IDLE_HOURS: "${DCA_IDLE_HOURS:-0}"
       DCA_ALLOW_TAGS: "${DCA_ALLOW_TAGS:-0}"
       DCA_ALLOW_PRIVATE_URL: "${DCA_ALLOW_PRIVATE_URL:-0}"
-      # Optional git credentials for clone/push. The token stays on this side and is
+      # Optional git credentials for dc clone only. The token stays on this side and is
       # handed to git through a credential helper, never to the devbox.
       DCA_GIT_TOKEN: "${DCA_GIT_TOKEN:-}"
       DCA_GIT_USER: "${DCA_GIT_USER:-x-access-token}"
       # Commit identity written into every devbox, plus the token, so the agent can
       # git clone/commit/push inside the container. DCA_INJECT_GIT=0 keeps the token
-      # on this side only (then use `dc clone` / `dc push`).
+      # on this side only (push is always done inside the devbox).
       DCA_INJECT_GIT: "${DCA_INJECT_GIT:-1}"
       DCA_GIT_NAME: "${DCA_GIT_NAME:-sysnapse}"
       DCA_GIT_EMAIL: "${DCA_GIT_EMAIL:-8198069+sysnapse@users.noreply.github.com}"
