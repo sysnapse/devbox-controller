@@ -157,12 +157,50 @@ def main():
     mod.GIT_TOKEN = ""
     check("no helper without a token",
           mod.git_args("clone", "--", "u", "d") == ["git", "clone", "--", "u", "d"])
+    print("concurrency cap")
+    live = "devbox-a\ttaska\tgood\tUp 2 minutes\n"
+    stopped = "devbox-a\ttaska\tgood\tExited (0) 5 minutes ago\n"
+    mod.MAX_TASKS = 1
+    mod.docker = fake_ps(live)
+    check("refuse a second devbox at the cap",
+          raises(lambda: mod.do_create({"template": "good", "task": "demo2"}), mod.Bad))
+    mod.docker = fake_ps(stopped)
+    check("a stopped box frees the slot",
+          mod.do_create({"template": "good", "task": "demo2"})["task"] == "demo2")
+    mod.MAX_TASKS = 2
+    mod.docker = fake_ps(live)
+    check("DCA_MAX_TASKS=2 allows a second box",
+          mod.do_create({"template": "good", "task": "demo3"})["task"] == "demo3")
+    mod.MAX_TASKS = 0
+    mod.docker = fake_ps(live * 5)
+    check("0 disables the cap",
+          mod.do_create({"template": "good", "task": "demo4"})["task"] == "demo4")
+    mod.MAX_TASKS = 1
+    check("the cap is reported by health",
+          mod.MAX_TASKS == 1 and mod.count_live() == 5)
+    mod.docker = fake_ps("")
+
     print("result")
     if failures:
         print("%d failed: %s" % (len(failures), ", ".join(failures)))
         return 1
     print("all passed")
     return 0
+
+
+def fake_ps(rows):
+    """docker stub: the label listing returns `rows`, the name check returns nothing."""
+    def run(args, timeout=120, check=True):
+        class P:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        p = P()
+        joined = " ".join(args)
+        if args and args[0] == "ps" and "label=devbox.owner" in joined:
+            p.stdout = rows
+        return p
+    return run
 
 
 def capture(log, args):
