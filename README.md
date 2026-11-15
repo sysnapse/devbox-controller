@@ -167,6 +167,20 @@ dc rm task-001
 
 **Wrap composite commands in `sh -lc '...'`.** The command is passed as an argv array and never goes through a host shell, so pipes and `&&` only work if you explicitly ask a shell inside the devbox to interpret them.
 
+## Concurrency cap
+
+`DCA_MAX_TASKS` (default **1**) caps how many devboxes may run at the same time. A stopped box
+does not count; a box still being created does, so two simultaneous `dc new` calls cannot both
+slip through. When the cap is reached `dc new` fails with:
+
+```
+concurrency limit reached: 1 devbox(es) running, DCA_MAX_TASKS=1.
+Run `dc tasks`, then `dc rm <task>` for the box you finished with ...
+```
+
+`GET /v1/health` reports `{"ok": true, "max_tasks": 1, "live_tasks": 0}` so a caller can see
+the cap before trying. Set `DCA_MAX_TASKS=0` only if you have measured that the host can take it.
+
 ## Templates shipped
 
 34 templates cover the mainstream languages. Every one of them is checked at
@@ -391,6 +405,7 @@ Devboxes still need the public internet for `git clone` and package installs, so
 | `DCA_NETWORK` | empty | Default devbox network; empty or `default` means no `--network` flag |
 | `DCA_OWNER` | `agent` | Container label the controller is allowed to manage |
 | `DCA_EXEC_TIMEOUT` | `900` | Per-exec timeout in seconds |
+| `DCA_MAX_TASKS` | `1` | Hard cap on simultaneously running devboxes; `0` or negative = no cap |
 | `DCA_IDLE_HOURS` | `0` | If > 0, periodically stop idle tasks |
 | `DCA_ALLOW_TAGS` | `0` | Allow image tags instead of digests (not recommended) |
 | `DCA_ALLOW_PRIVATE_URL` | `0` | Allow cloning private/internal URLs (not recommended) |
@@ -428,4 +443,4 @@ Not yet verified: a devbox actually starting end to end on pi5, arm64 digest pul
 5. **If the agent also has a host shell, the whole design is void.** The agent must genuinely have only the HTTP path.
 6. **No segmentation means no second wall.** If the token leaks, or the controller has an RCE, there is no network layer left to buy time.
 7. **`172.17.0.1` is only the default-bridge gateway.** If the host sets `bip` or `default-address-pools` in `daemon.json`, or the container is attached to a custom network, set `DCA_URL` yourself.
-8. **Resource reclamation is not enforced.** `DCA_IDLE_HOURS` defaults to `0` (never reclaim), so long-lived devboxes accumulate.
+8. **One devbox at a time by default.** `DCA_MAX_TASKS=1` refuses a second `dc new` with `concurrency limit reached`, so a caller that forgets `dc rm` notices immediately instead of stacking containers. Raise it deliberately on a bigger host. `DCA_IDLE_HOURS` still defaults to `0`, so nothing is reclaimed automatically: the cap bounds the damage, it does not clean up.
