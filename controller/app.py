@@ -43,6 +43,9 @@ OWNER = os.environ.get("DCA_OWNER", "agent")
 DOCKER = os.environ.get("DCA_DOCKER", "docker")
 EXEC_TIMEOUT = int(os.environ.get("DCA_EXEC_TIMEOUT", "900"))
 IDLE_HOURS = float(os.environ.get("DCA_IDLE_HOURS", "0"))
+# Hard cap on simultaneously running devboxes. 1 by default: one job at a time,
+# so a runaway agent cannot fill the host. 0 or negative = no cap (opt in knowingly).
+MAX_TASKS = int(os.environ.get("DCA_MAX_TASKS", "1"))
 ALLOW_TAGS = os.environ.get("DCA_ALLOW_TAGS", "0") == "1"
 ALLOW_PRIVATE_URL = os.environ.get("DCA_ALLOW_PRIVATE_URL", "0") == "1"
 # Optional git credentials for `dc clone` only, kept on the host side.
@@ -70,6 +73,9 @@ NET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 PKG_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]{0,63}$")
 
 _last_used = {}
+# Tasks whose container is still being created. Counted against MAX_TASKS so two
+# simultaneous creates cannot both pass the check before either is running.
+_reservations = set()
 _lock = threading.Lock()
 
 
@@ -245,6 +251,11 @@ def list_own():
     return rows
 
 
+def count_live():
+    """Tasks whose container is actually up. A stopped box holds no CPU or RAM."""
+    return len([r for r in list_own() if r["status"].startswith("Up")])
+
+
 def require_container(task):
     require_task(task)
     proc = docker(["ps", "-a", "--filter", "name=^%s$" % cname(task),
@@ -389,10 +400,30 @@ def do_create(payload):
             % (work, os.getuid(), exc, WORK_ROOT, os.getuid(), os.getgid(), WORK_ROOT)
         )
     os.chmod(work, 0o777)  # devbox runs as a non-root uid; open just this task dir
-    existing = docker(["ps", "-a", "--filter", "name=^%s$" % cname(task),
-                       "--format", "{{.Names}}"], check=False).stdout.strip()
-    if existing:
-        raise Bad("task already exists: " + task)
+    with _lock:
+        existing = docker(["ps", "-a", "--filter", "name=^%s$" % cname(task),
+                           "--format", "{{.Names}}"], check=False).stdout.strip()
+        if existing:
+            raise Bad("task already exists: " + task)
+        if MAX_TASKS > 0:
+            live = count_live()
+            pending = len(_reservations)
+            if live + pending >= MAX_TASKS:
+                raise Bad(
+                    "concurrency limit reached: %d devbox(es) running, DCA_MAX_TASKS=%d. "
+                    "Run `dc tasks`, then `dc rm <task>` for the box you finished with "
+                    "(a task can be reused after `dc rm`), or raise DCA_MAX_TASKS on the "
+                    "controller." % (live + pending, MAX_TASKS))
+        _reservations.add(task)
+    try:
+        return _create_locked(task, tpl, work)
+    finally:
+        with _lock:
+            _reservations.discard(task)
+
+
+def _create_locked(task, tpl, work):
+    """Create the container and provision it. Caller holds a reservation slot."""
     args = [
         "run", "-d", "--name", cname(task),
         "--label", "devbox.owner=" + OWNER,
@@ -615,7 +646,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = self._body() if method in ("POST", "DELETE") else {}
             if method == "GET" and path == "/v1/health":
-                self._send(200, {"ok": True, "owner": OWNER})
+                self._send(200, {"ok": True, "owner": OWNER, "max_tasks": MAX_TASKS,
+                             "live_tasks": count_live()})
             elif method == "GET" and path == "/v1/templates":
                 self._send(200, {"templates": list_templates()})
             elif method == "GET" and path == "/v1/tasks":
