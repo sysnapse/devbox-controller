@@ -135,8 +135,13 @@ def main():
                       "echo hi > /workspace/from-devbox.txt && cat /workspace/from-devbox.txt")
     check("devbox can write the workspace", rc == 0 and "hi" in out, (out or err)[:120])
     rc, out, err = dc("push", task)
-    check("push on a non-repo gives a clear error",
-          rc == 1 and "not a git repository" in out, (out or err)[:160])
+    check("dc push is gone (no controller-side push path)",
+          rc == 2 and "unknown subcommand" in (out + err), (out or err)[:160])
+
+    rc, out, err = dc("exec", task, "--", "sh", "-lc",
+                      "git -C /workspace push 2>&1 | head -2")
+    check("git push in a non-repo fails with git's own error, not the controller",
+          "not a git repository" in out, (out or err)[:160])
 
     print("== git inside the devbox")
     rc, out, err = dc("exec", task, "--", "sh", "-lc", "git --version")
