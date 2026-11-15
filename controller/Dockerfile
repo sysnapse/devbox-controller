@@ -1,6 +1,6 @@
 FROM alpine:3.21
 
-# 只装必要件：python3 + py3-yaml 解析模板、docker-cli 操作 socket、git 做 clone/push
+# 只装必要件：python3 + py3-yaml 解析模板、docker-cli 操作 socket、git 做 clone（push 由 devbox 內自行處理）
 RUN apk add --no-cache python3 py3-yaml docker-cli git openssh-client ca-certificates tzdata \
  && update-ca-certificates
 
