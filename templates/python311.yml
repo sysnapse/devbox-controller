@@ -9,5 +9,5 @@ memory: 4g
 pids: 512
 user: "1000:1000"
 # Installed at create time with whatever manager the image ships (apk/apt-get/dnf)
-packages: [git, build-base]
+packages: [git, build-base, ffmpeg]
 notes: "Python 3.11 with pip; build-base for C extensions"
