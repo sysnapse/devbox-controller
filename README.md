@@ -194,15 +194,15 @@ the table).
 |---|---|---|---|---|
 | `base` | `alpine:3.21` | 1 cpu / 1g | git | minimal Alpine toolchain; use a language template for real work |
 | `bun` | `oven/bun:1-alpine` | 2 cpu / 2g | git | Bun runtime and package manager |
-| `c` | `alpine:3.21` | 2 cpu / 2g | build-base, git, cmake, cmocka-dev, ffmpeg | C toolchain: gcc, make, cmake, cmocka |
+| `c` | `alpine:3.21` | 2 cpu / 2g | build-base, git, cmake, cmocka-dev | C toolchain: gcc, make, cmake, cmocka |
 | `clojure` | `clojure:temurin-25-tools-deps-bookworm-slim` | 2 cpu / 4g | git | Clojure with the Clojure CLI and tools.deps |
-| `cpp` | `alpine:3.21` | 2 cpu / 2g | build-base, git, cmake, ffmpeg | C++ toolchain: g++, make, cmake |
-| `crystal` | `crystallang/crystal:1.22.3-alpine` | 2 cpu / 4g | git, build-base, ffmpeg | Crystal 1.22 with shards |
+| `cpp` | `alpine:3.21` | 2 cpu / 2g | build-base, git, cmake | C++ toolchain: g++, make, cmake |
+| `crystal` | `crystallang/crystal:1.22.3-alpine` | 2 cpu / 4g | git, build-base | Crystal 1.22 with shards |
 | `dart` | `dart:stable` | 2 cpu / 4g | git | Dart SDK with pub |
 | `deno` | `denoland/deno:alpine` | 2 cpu / 2g | git | Deno runtime (TypeScript out of the box) |
 | `dotnet` | `mcr.microsoft.com/dotnet/sdk:10.0` | 2 cpu / 6g | git | dotnet SDK 10 (C#, F#, VB); Debian base from mcr.microsoft.com |
-| `elixir` | `elixir:1.20-alpine` | 2 cpu / 4g | git, build-base, ffmpeg | Elixir with mix and iex; build-base for NIFs |
-| `erlang` | `erlang:28-alpine` | 2 cpu / 4g | git, build-base, ffmpeg | Erlang/OTP 28 with rebar3 |
+| `elixir` | `elixir:1.20-alpine` | 2 cpu / 4g | git, build-base | Elixir with mix and iex; build-base for NIFs |
+| `erlang` | `erlang:28-alpine` | 2 cpu / 4g | git, build-base | Erlang/OTP 28 with rebar3 |
 | `fortran` | `gcc:15` | 2 cpu / 2g | git | GFortran from the official GCC image (Debian base, gfortran already present) |
 | `go` | `golang:1.27-alpine` | 2 cpu / 4g | git, make | Go toolchain; the image already carries git |
 | `groovy` | `groovy:jdk21-noble` | 2 cpu / 4g | git | Groovy with the JDK 21 image underneath |
@@ -219,12 +219,12 @@ the table).
 | `ocaml` | `ocaml/opam:debian-12-ocaml-5.3` | 2 cpu / 4g | git | OCaml 5.3 with opam and dune |
 | `perl` | `perl:5.42-slim` | 2 cpu / 2g | git, build-essential | Perl 5.42 with cpan; build-essential for XS modules |
 | `php` | `php:8.5-alpine` | 2 cpu / 4g | git | PHP 8.5 CLI; composer is not an Alpine package, fetch it with the agent |
-| `python311` | `python:3.11-alpine` | 2 cpu / 4g | git, build-base, ffmpeg | Python 3.11 with pip; build-base for C extensions |
-| `python312` | `python:3.12-alpine` | 2 cpu / 4g | git, build-base, ffmpeg | Python 3.12 with pip; build-base for C extensions |
-| `python313` | `python:3.13-alpine` | 2 cpu / 4g | git, build-base, ffmpeg | Python 3.13 with pip; build-base for C extensions |
+| `python311` | `python:3.11-alpine` | 2 cpu / 4g | git, build-base | Python 3.11 with pip; build-base for C extensions |
+| `python312` | `python:3.12-alpine` | 2 cpu / 4g | git, build-base | Python 3.12 with pip; build-base for C extensions |
+| `python313` | `python:3.13-alpine` | 2 cpu / 4g | git, build-base | Python 3.13 with pip; build-base for C extensions |
 | `r` | `r-base:4.5.2` | 2 cpu / 4g | git | R 4.5 with install.packages support |
-| `ruby` | `ruby:3.4-alpine` | 2 cpu / 4g | git, build-base, yaml-dev, ffmpeg | Ruby 3.4 with bundler; build-base for native gems |
-| `rust` | `rust:1.100-alpine` | 2 cpu / 4g | git, build-base, ffmpeg | rustc and cargo; build-base is needed to link musl targets |
+| `ruby` | `ruby:3.4-alpine` | 2 cpu / 4g | git, build-base, yaml-dev | Ruby 3.4 with bundler; build-base for native gems |
+| `rust` | `rust:1.100-alpine` | 2 cpu / 4g | git, build-base | rustc and cargo; build-base is needed to link musl targets |
 | `swift` | `swift:6.2` | 2 cpu / 6g | git | Swift 6.2 toolchain (Debian base); heavy image |
 
 Pick a template by language, not by version, unless you need a specific one:
