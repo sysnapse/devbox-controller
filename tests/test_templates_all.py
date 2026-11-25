@@ -28,7 +28,6 @@ def main():
     os.environ.update({
         "DCA_TOKEN": "t" * 32,
         "DCA_TEMPLATES_DIR": str(TEMPLATES),
-        "DCA_WORK_ROOT": str(work),
         "DCA_DOCKER": str(HERE / "fake-docker"),
         "DCA_OWNER": "agent",
         "DCA_INJECT_GIT": "0",

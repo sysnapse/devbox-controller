@@ -1,0 +1,30 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+# Unit and provisioning tests use a fake docker shim; no docker daemon is needed.
+# e2e_live.py is intentionally excluded: it needs a running controller + token.
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python3 -m pip install pyyaml
+      - name: Compile check
+        run: python3 -m py_compile controller/app.py client/dc tests/*.py
+      - name: Controller unit tests
+        run: python3 tests/test_controller.py
+      - name: Git-injection tests
+        run: python3 tests/test_git_injection.py
+      - name: Package-manager detection tests
+        run: python3 tests/test_pkg_managers.py
+      - name: All templates valid
+        run: python3 tests/test_templates_all.py
+      - name: Baked-in template fallback
+        run: python3 tests/test_templates_fallback.py

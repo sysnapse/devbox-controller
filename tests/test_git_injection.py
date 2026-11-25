@@ -40,7 +40,6 @@ def load(inject="1", token="tok-abc"):
     os.environ.update({
         "DCA_TOKEN": "t" * 32,
         "DCA_TEMPLATES_DIR": str(tpl),
-        "DCA_WORK_ROOT": str(work),
         "DCA_DOCKER": str(fake),
         "DCA_OWNER": "agent",
         "DCA_GIT_TOKEN": token,

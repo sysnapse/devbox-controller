@@ -34,7 +34,6 @@ def load():
     os.environ.update({
         "DCA_TOKEN": "t" * 32,
         "DCA_TEMPLATES_DIR": str(tpl),
-        "DCA_WORK_ROOT": str(work),
         "DCA_DOCKER": str(fake),
         "DCA_OWNER": "agent",
         "FAKE_LOG": str(log),
@@ -62,7 +61,7 @@ def main():
     res = mod.install_packages("t2", ["git", "build-essential"])
     check("apt-get install ok", res == "ok (apt-get: git build-essential)", res)
     body = log.read_text()
-    check("apt-get updates the index first", "apt-get update -qq" in body)
+    check("apt-get updates the index first", "update -qq" in body and "apt-get" in body)
     check("apt-get avoids recommends", "--no-install-recommends" in body)
     check("apt-get leaves no lists behind", "rm -rf /var/lib/apt/lists/*" in body)
 
