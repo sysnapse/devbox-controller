@@ -2,10 +2,11 @@
 # One-time (and idempotent) host setup for the devbox controller.
 #
 # It only touches things you would otherwise get wrong by hand:
-#   1. .env exists, with a real DCA_TOKEN (32 bytes) and an absolute DCA_HOST_WORK_ROOT
-#   2. DCA_HOST_WORK_ROOT exists and is owned by the uid the controller runs as
-#   3. DOCKER_GID matches the host's docker socket group
+#   1. .env exists, with a real DCA_TOKEN (32 bytes)
+#   2. DOCKER_GID matches the host's docker socket group
 #
+# 2026-11-25: there is no host work root any more, so no directory ownership fix.
+# Devboxes own an ephemeral in-container workspace; `dc rm` / `dc gc` removes it.
 # Safe to re-run: it keeps existing values and never overwrites a non-empty token.
 set -euo pipefail
 
@@ -13,12 +14,6 @@ cd "$(dirname "$0")"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-
-# ---- what uid/gid does the controller run as? -------------------------------
-# Must match controller/Dockerfile defaults; devbox templates use 1000:1000 too,
-# so cloned files stay writable inside the devbox.
-CTRL_UID="${DCA_UID:-1000}"
-CTRL_GID="${DCA_GID:-1000}"
 
 # ---- .env ------------------------------------------------------------------
 if [ ! -f .env ]; then
@@ -46,48 +41,6 @@ if [ -z "$tok" ] || [ "${#tok}" -lt 16 ]; then
   say "generated DCA_TOKEN (${#tok} chars)"
 else
   say "kept existing DCA_TOKEN"
-fi
-
-work="$(get_val DCA_HOST_WORK_ROOT || true)"
-if [ -z "$work" ]; then
-  work="$(pwd)/work"
-  say "DCA_HOST_WORK_ROOT was empty, defaulting to $work"
-fi
-case "$work" in
-  /*) : ;;
-  *) die "DCA_HOST_WORK_ROOT must be an absolute path, got: $work" ;;
-esac
-set_val DCA_HOST_WORK_ROOT "$work"
-
-# ---- work root ownership ---------------------------------------------------
-# The controller cannot chown a host directory itself: it is unprivileged
-# inside the container. Someone on the host has to do it once.
-mkdir -p "$work" 2>/dev/null || true
-if [ ! -d "$work" ]; then
-  die "cannot create $work (parent not writable, try: sudo mkdir -p $work)"
-fi
-
-cur_uid="$(stat -c %u "$work")"
-cur_gid="$(stat -c %g "$work")"
-if [ "$cur_uid" = "$CTRL_UID" ] && [ "$cur_gid" = "$CTRL_GID" ]; then
-  say "work root already owned by $CTRL_UID:$CTRL_GID"
-else
-  say "work root is $cur_uid:$cur_gid, needs $CTRL_UID:$CTRL_GID"
-  if [ "$(id -u)" = "$CTRL_UID" ] && [ -w "$work" ]; then
-    # Common case on pi5: your user IS uid 1000, same as the controller.
-    say "your user is uid $CTRL_UID and can write it already; nothing to do"
-  else
-    chown_cmd="chown -R $CTRL_UID:$CTRL_GID $work"
-    if [ "$(id -u)" = "0" ]; then
-      sh -c "$chown_cmd"
-      say "chowned $work to $CTRL_UID:$CTRL_GID"
-    elif command -v sudo >/dev/null 2>&1; then
-      say "running: sudo $chown_cmd"
-      sudo sh -c "$chown_cmd"
-    else
-      die "need to run as root: $chown_cmd"
-    fi
-  fi
 fi
 
 # ---- docker socket group ---------------------------------------------------
@@ -118,3 +71,6 @@ say ""
 say "OK. Next:"
 say "  docker compose up -d --build"
 say "  docker compose logs -f controller     # expect: listening on 0.0.0.0:47123"
+say ""
+say "Note: devboxes keep their workspace inside the container only. Use"
+say "  dc rm <task>  or  dc gc  to remove a box and everything it built."

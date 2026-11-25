@@ -35,7 +35,6 @@ os.environ.update({
     "DCA_TOKEN": "t" * 32,
     "DCA_TEMPLATES_DIR": str(empty),
     "DCA_TEMPLATES_DIR_FALLBACK": str(builtin),
-    "DCA_WORK_ROOT": str(tmp / "work"),
     "DCA_OWNER": "agent",
 })
 spec.loader.exec_module(mod)

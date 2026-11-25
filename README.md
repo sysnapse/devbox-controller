@@ -10,14 +10,14 @@ flowchart LR
     subgraph host["pi5 host"]
         gw["docker0 gateway<br/>172.17.0.1:47123"]
         ctrl["controller<br/>devbox-controller container<br/>network_mode: host<br/>docker socket + git credentials"]
-        dbx["devbox-TASK<br/>one container per task<br/>cap_drop: ALL<br/>no-new-privileges<br/>no socket<br/>only /workspace mounted<br/>git ready: identity + scoped token"]
+        dbx["devbox-TASK<br/>one container per task<br/>cap_drop: ALL<br/>no-new-privileges<br/>no socket<br/>ephemeral /workspace inside container<br/>git ready: identity + scoped token"]
     end
     gh["GitHub"]
 
     agent -- "HTTP + Bearer token" --> gw
     gw --> ctrl
     ctrl -- "docker run, fully fixed flags" --> dbx
-    ctrl -- "git clone on the host (read only)" --> gh
+    ctrl -- "in-container git clone (inside devbox)" --> gh
     agent -. "cannot reach: no socket, no creds" .-> dbx
 ```
 
@@ -25,7 +25,7 @@ flowchart LR
 |---|---|---|---|
 | **agent** | Your agent container, executing coding tasks | `DCA_TOKEN` (`DCA_URL` optional) | Default bridge is fine; reaches the controller via the bridge gateway `172.17.0.1:47123` |
 | **controller** | `devbox-controller` container running `app.py` | Docker socket, git credentials | `network_mode: host`, listens on `0.0.0.0:47123` |
-| **devbox** | `devbox-<task>` container, one per task | Only its `/workspace` | Created on demand by the controller |
+| **devbox** | `devbox-<task>` container, one per task | Its own in-container `/workspace` (no host mount) | Created on demand; `dc rm` removes it and everything it built |
 
 **No `docker network create` anywhere.** The controller uses host networking; the agent stays on the default bridge. They meet at the bridge gateway, and the only authentication is a Bearer token.
 
@@ -45,9 +45,9 @@ sequenceDiagram
     Ctrl-->>Agent: base, node22, python312
     Agent->>Ctrl: POST /v1/tasks {template, task}
     Ctrl->>Dev: docker run (image@sha256 digest, fixed flags)
-    Ctrl-->>Agent: 201 {task, host_path}
+    Ctrl-->>Agent: 201 {task, container, workspace}
     Agent->>Ctrl: POST /v1/tasks/TASK/clone {url, dir}
-    Ctrl->>GH: git clone (host side, credentials stay on host)
+    Ctrl->>Dev: git clone inside container (token via injected helper)
     Ctrl-->>Agent: {path, rel}
     Agent->>Ctrl: POST /v1/tasks/TASK/exec {cmd: [...]}
     Ctrl->>Dev: docker exec
@@ -65,8 +65,8 @@ Every step above is one HTTP call. The agent has no other way in: no socket, no 
 |---|---|
 | A Docker socket in the agent equals host root | The agent never mounts a socket; it only holds a token |
 | `devcontainer.json` from a repo is an attack surface | It is never read. The environment is 100% decided by owner-written templates |
-| The agent wants `--privileged` / `--mount` | There is no entry point for it: the API accepts only a template name, a task name and a command array |
-| A devbox escape steals git credentials | Clone and push run on the host inside the controller. Devboxes contain zero credentials |
+| The agent wants `--privileged` / `--mount` | No entry point: the API accepts only a template name, a task name and a command array. No host workspace is mounted at all (2026-11-25) |
+| A devbox escape steals git credentials | Clone and push run inside the devbox with its own injected token; the controller holds no push credential |
 | A devbox attacks the controller | No token means `401` on every route, and the controller only ever touches containers carrying its own `devbox.owner` label |
 | The machine cannot create Docker networks | No path calls `docker network create`; a devbox simply inherits the default bridge |
 | The agent must not choose its own image | Templates are read-only to the agent, pin `@sha256` digests, and are validated as whole files |
@@ -87,31 +87,18 @@ docker compose logs -f controller
 |---|---|
 | `.env` | copies `.env.example` if missing; **never overwrites an existing token** |
 | `DCA_TOKEN` | generates a 32-byte hex token if the value is empty or shorter than 16 chars |
-| `DCA_HOST_WORK_ROOT` | defaults to `$PWD/work` (absolute), keeps your value if already set |
-| work root | `mkdir -p`, then makes it writable by the uid the controller runs as |
 | `DOCKER_GID` | reads the real group id off `/var/run/docker.sock` |
 | `DCA_PORT` | migrates an old `8080` to `47123` |
 
 The startup log should read:
 
 ```
-devbox controller listening on 0.0.0.0:47123 (owner=agent, work_root=..., network=(docker default))
+devbox controller listening on 0.0.0.0:47123 (owner=agent, max_tasks=8, network=(docker default), workspace=container-only)
 ```
 
-### Why the work root needs a host-side fix
+### No host work root (2026-11-25)
 
-The controller runs as an **unprivileged uid inside its container** (`DCA_UID`, default `1000`) so that files it clones stay writable inside the devbox, whose templates also use `1000:1000`. An unprivileged container **cannot `chown` the host side of a bind mount**, so the directory has to be prepared from the host, once:
-
-```sh
-# recommended: let setup.sh do it
-./setup.sh
-
-# or by hand
-sudo mkdir -p /srv/devbox-work && sudo chown 1000:1000 /srv/devbox-work
-# then set DCA_HOST_WORK_ROOT=/srv/devbox-work in .env
-```
-
-On a host where your own login is uid 1000 (common on a Pi), `mkdir work` as yourself is already enough — no `sudo` involved. If `DCA_HOST_WORK_ROOT` is not writable the controller **refuses to start** and prints the exact `chown` command with the real uid/gid, instead of failing later on the first task.
+There is **no host work root and no workspace bind mount**. Each devbox creates an ephemeral `/workspace` inside its own container, owned by the template user (`1000:1000`). `dc clone` clones a repository INTO that container with git; all build artifacts (`node_modules`, cargo `target`, ...) stay in the container layer. `dc rm` removes one box, `dc gc` removes all stopped boxes — and with them everything they built. Nothing accumulates on the host disk. This replaced an earlier bind-mount design that let build artifacts persist and filled the host (see `reports/incidents/2026-11-25-devbox-storage.md` in Mine's workspace).
 
 Changing `DCA_UID` means also passing the same value to the image build, and changing the `user:` in your templates:
 
@@ -169,17 +156,19 @@ dc rm task-001
 
 ## Concurrency cap
 
-`DCA_MAX_TASKS` (default **1**) caps how many devboxes may run at the same time. A stopped box
-does not count; a box still being created does, so two simultaneous `dc new` calls cannot both
-slip through. When the cap is reached `dc new` fails with:
+`DCA_MAX_TASKS` (default **8**) caps the **number of owned devbox containers, running AND
+stopped**. A stopped box still holds its build artifacts in the container layer, so it counts
+toward the cap; a box still being created also counts, so two simultaneous `dc new` calls cannot
+both slip through. When the cap is reached `dc new` fails with:
 
 ```
-concurrency limit reached: 1 devbox(es) running, DCA_MAX_TASKS=1.
-Run `dc tasks`, then `dc rm <task>` for the box you finished with ...
+container limit reached: 8 devbox container(s) exist, DCA_MAX_TASKS=8.
+Run `dc tasks`, then `dc rm <task>` ... or `dc gc` to remove all stopped boxes.
 ```
 
-`GET /v1/health` reports `{"ok": true, "max_tasks": 1, "live_tasks": 0}` so a caller can see
-the cap before trying. Set `DCA_MAX_TASKS=0` only if you have measured that the host can take it.
+`GET /v1/health` reports `{"ok": true, "max_tasks": 8, "live_tasks": 0, "total_tasks": 0}`.
+Use `dc gc` regularly to reclaim stopped boxes. Set `DCA_MAX_TASKS=0` only if you have measured
+that the host can take it.
 
 ## Templates shipped
 
@@ -279,7 +268,7 @@ docker image rm <image>            # per image
 docker image prune -a              # every image no container uses, ask first
 ```
 
-`dc rm <task>` removes the container; it does not remove the image.
+`dc rm <task>` removes the container and everything it built; `dc gc` removes all stopped boxes. Neither removes the image.
 
 ## Writing a template
 
@@ -347,9 +336,9 @@ dc exec mytask -- sh -c 'cd repo && echo x >> f && git commit -am wip && git pus
 - Tools that want a token in the environment can `export GH_TOKEN=$(cat /etc/devbox-git-token)`.
 - `DCA_INJECT_GIT=0` turns all of this off, so the token stays on the controller side only.
 
-### 2. `dc clone` only, on the controller
+### 2. `dc clone` inside the devbox
 
-`dc clone <task> <url> [dir]` runs `git clone` **on the host** in the controller process,
+`dc clone <task> <url> [dir]` runs `git clone` **inside the devbox** via `docker exec`, using the
 which keeps a read token out of the devbox. There is **no `dc push`**: pushing is always
 done by the agent inside the devbox with the agent's own token, so a compromised devbox
 cannot borrow the controller's write credential. The token for clone is passed through the
@@ -399,17 +388,16 @@ Devboxes still need the public internet for `git clone` and package installs, so
 | Variable | Default | Meaning |
 |---|---|---|
 | `DCA_TOKEN` | none (required) | Bearer token, at least 16 characters; generate with `openssl rand -hex 32` |
-| `DCA_HOST_WORK_ROOT` | none (required) | Host path, mounted into the controller under the identical path |
 | `DCA_BIND` | `0.0.0.0` | Controller bind address. `127.0.0.1` only works for host-network callers, so a bridge agent cannot connect |
 | `DCA_PORT` | `47123` | Controller listen port |
 | `DCA_NETWORK` | empty | Default devbox network; empty or `default` means no `--network` flag |
 | `DCA_OWNER` | `agent` | Container label the controller is allowed to manage |
 | `DCA_EXEC_TIMEOUT` | `900` | Per-exec timeout in seconds |
-| `DCA_MAX_TASKS` | `1` | Hard cap on simultaneously running devboxes; `0` or negative = no cap |
+| `DCA_MAX_TASKS` | `8` | Hard cap on number of owned containers (running AND stopped); `0` or negative = no cap |
 | `DCA_IDLE_HOURS` | `0` | If > 0, periodically stop idle tasks |
 | `DCA_ALLOW_TAGS` | `0` | Allow image tags instead of digests (not recommended) |
 | `DCA_ALLOW_PRIVATE_URL` | `0` | Allow cloning private/internal URLs (not recommended) |
-| `DCA_GIT_TOKEN` | empty | Read token for `dc clone` only; copied into each devbox when injection is on. Not used for push |
+| `DCA_GIT_TOKEN` | empty | Token for in-container `dc clone`; injected into each devbox when injection is on. Not used for push |
 | `DCA_GIT_USER` | `x-access-token` | Username paired with `DCA_GIT_TOKEN` |
 | `DCA_INJECT_GIT` | `1` | Write identity, credential helper and token into each devbox; `0` keeps the token on the controller |
 | `DCA_GIT_NAME` / `DCA_GIT_EMAIL` | `sysnapse` / `8198069+sysnapse@users.noreply.github.com` | Commit identity inside devboxes |
@@ -443,4 +431,4 @@ Not yet verified: a devbox actually starting end to end on pi5, arm64 digest pul
 5. **If the agent also has a host shell, the whole design is void.** The agent must genuinely have only the HTTP path.
 6. **No segmentation means no second wall.** If the token leaks, or the controller has an RCE, there is no network layer left to buy time.
 7. **`172.17.0.1` is only the default-bridge gateway.** If the host sets `bip` or `default-address-pools` in `daemon.json`, or the container is attached to a custom network, set `DCA_URL` yourself.
-8. **One devbox at a time by default.** `DCA_MAX_TASKS=1` refuses a second `dc new` with `concurrency limit reached`, so a caller that forgets `dc rm` notices immediately instead of stacking containers. Raise it deliberately on a bigger host. `DCA_IDLE_HOURS` still defaults to `0`, so nothing is reclaimed automatically: the cap bounds the damage, it does not clean up.
+8. **Bounded container count.** `DCA_MAX_TASKS=8` caps the total number of owned containers (running or stopped), so a caller that forgets `dc rm` cannot stack them without limit. No host workspace is mounted, so build artifacts die with the container. Use `dc rm` / `dc gc` to reclaim boxes; `DCA_IDLE_HOURS` defaults to `0` (no automatic idle stop).

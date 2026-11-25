@@ -10,6 +10,11 @@ Design notes:
   * Templates are fixed by the owner in /templates (plain YAML). The agent names one
     and cannot pass any docker flag.
   * Every container carries devbox.task / devbox.owner labels; only labelled ones are touched.
+  * NO workspace is bind-mounted from the host (2026-11-25 rewrite). A devbox owns an
+    ephemeral workspace inside the container; a repository is cloned INTO the container
+    with git, and every build artifact (node_modules, cargo target, ...) lives in the
+    container layer. `dc rm` removes the container and everything it built. Nothing
+    accumulates on the host disk.
   * Depends on the Python standard library, PyYAML and the docker CLI only.
 """
 
@@ -18,6 +23,7 @@ import ipaddress
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -35,7 +41,6 @@ TEMPLATES_DIR = os.environ.get("DCA_TEMPLATES_DIR", "/templates")
 # Templates baked into the image at build time. Used when the mounted directory
 # is empty or missing, so the API never reports zero templates.
 TEMPLATES_FALLBACK = os.environ.get("DCA_TEMPLATES_DIR_FALLBACK", "/opt/templates")
-WORK_ROOT = os.environ.get("DCA_WORK_ROOT", "/work")
 # Empty or "default" = no --network flag, so no docker network create is needed.
 # Set "none" to isolate; to attach an existing network, put its name here.
 DEFAULT_NETWORK = os.environ.get("DCA_NETWORK", "")
@@ -43,24 +48,27 @@ OWNER = os.environ.get("DCA_OWNER", "agent")
 DOCKER = os.environ.get("DCA_DOCKER", "docker")
 EXEC_TIMEOUT = int(os.environ.get("DCA_EXEC_TIMEOUT", "900"))
 IDLE_HOURS = float(os.environ.get("DCA_IDLE_HOURS", "0"))
-# Hard cap on simultaneously running devboxes. 1 by default: one job at a time,
-# so a runaway agent cannot fill the host. 0 or negative = no cap (opt in knowingly).
-MAX_TASKS = int(os.environ.get("DCA_MAX_TASKS", "1"))
+# Hard cap on the NUMBER of owned devbox containers (running OR stopped). With no
+# host workspace, a stopped box still holds its build artifacts in the container
+# layer, so the cap must count every container, not just the running ones.
+# 0 or negative disables the cap (opt in knowingly).
+MAX_TASKS = int(os.environ.get("DCA_MAX_TASKS", "8"))
 ALLOW_TAGS = os.environ.get("DCA_ALLOW_TAGS", "0") == "1"
 ALLOW_PRIVATE_URL = os.environ.get("DCA_ALLOW_PRIVATE_URL", "0") == "1"
-# Optional git credentials for `dc clone` only, kept on the host side.
-# Pushing is the agent's job: it brings its own token inside the devbox.
-# The token never reaches the devbox: it is read from this process environment by
-# a git credential helper, so it never appears in argv or in a .git/config remote.
+# Optional git credentials for `dc clone`. With the host clone path removed, the
+# token is injected into each devbox (see INJECT_GIT) and git clone runs INSIDE the
+# container through that credential helper. It never appears in argv or in a
+# .git/config remote on the host.
 GIT_TOKEN = os.environ.get("DCA_GIT_TOKEN", "")
 GIT_USER = os.environ.get("DCA_GIT_USER", "x-access-token")
 # Commit identity used inside every devbox (so git commit works with no setup).
 GIT_NAME = os.environ.get("DCA_GIT_NAME", "sysnapse")
 GIT_EMAIL = os.environ.get("DCA_GIT_EMAIL",
                            "8198069+sysnapse@users.noreply.github.com")
-# Also install the identity and the token inside each devbox, so the agent can run
+# Install the identity and the token inside each devbox, so the agent can run
 # git clone/commit/push in the container itself (the agent supplies its own token).
-# DCA_INJECT_GIT=0 keeps any host token on the controller side (read path only).
+# DCA_INJECT_GIT=0 keeps any host token on the controller side; in-container clone
+# then needs credentials supplied another way and will report a clear error.
 INJECT_GIT = os.environ.get("DCA_INJECT_GIT", "1") == "1"
 # Binds 0.0.0.0 by default: the agent may sit on a bridge, where the only route in
 # is the bridge gateway. Authentication is the token, not the bind address.
@@ -226,14 +234,6 @@ def require_task(task):
     return task
 
 
-def work_path(task, sub=""):
-    base = os.path.realpath(WORK_ROOT)
-    path = os.path.realpath(os.path.join(base, task, sub))
-    if not (path == os.path.join(base, task) or path.startswith(os.path.join(base, task) + os.sep)):
-        raise Bad("path escapes the task workspace")
-    return path
-
-
 def list_own():
     proc = docker(["ps", "-a", "--filter", "label=devbox.owner=" + OWNER,
                    "--format", "{{.Names}}\t{{.Label \"devbox.task\"}}\t{{.Label \"devbox.template\"}}\t{{.Status}}"])
@@ -252,8 +252,13 @@ def list_own():
 
 
 def count_live():
-    """Tasks whose container is actually up. A stopped box holds no CPU or RAM."""
+    """Tasks whose container is actually up. Used for health reporting only."""
     return len([r for r in list_own() if r["status"].startswith("Up")])
+
+
+def count_owned():
+    """Every owned container, running or stopped: the real disk footprint."""
+    return len(list_own())
 
 
 def require_container(task):
@@ -263,6 +268,25 @@ def require_container(task):
     if not proc.stdout.strip():
         raise Bad("no container owned by this owner for task: " + task)
     return cname(task)
+
+
+def container_label(task, key, default=""):
+    """Read a label back from the running/stopped container (no host state)."""
+    proc = docker(["inspect", "--format",
+                   "{{index .Config.Labels \"%s\"}}" % key, cname(task)], check=False)
+    val = proc.stdout.strip()
+    return val if val and val != "<no value>" else default
+
+
+def container_workdir(task):
+    wd = container_label(task, "devbox.workdir", "/workspace")
+    return wd if wd.startswith("/") else "/workspace"
+
+
+def container_user(task):
+    proc = docker(["inspect", "--format", "{{.Config.User}}", cname(task)], check=False)
+    u = proc.stdout.strip()
+    return u if u and u != "<no value>" else "1000:1000"
 
 
 # ------------------------------------------------------------- actions
@@ -389,54 +413,44 @@ def devbox_env_args():
 def do_create(payload):
     task = require_task(payload.get("task", ""))
     tpl = load_template(payload.get("template", ""))
-    work = work_path(task)
-    try:
-        os.makedirs(work, exist_ok=True)
-    except OSError as exc:
-        raise Bad(
-            "cannot create workspace %s (controller uid=%d): %s. "
-            "Fix on the host: sudo mkdir -p %s && sudo chown %d:%d %s "
-            "(or run ./setup.sh)."
-            % (work, os.getuid(), exc, WORK_ROOT, os.getuid(), os.getgid(), WORK_ROOT)
-        )
-    os.chmod(work, 0o777)  # devbox runs as a non-root uid; open just this task dir
     with _lock:
         existing = docker(["ps", "-a", "--filter", "name=^%s$" % cname(task),
                            "--format", "{{.Names}}"], check=False).stdout.strip()
         if existing:
             raise Bad("task already exists: " + task)
         if MAX_TASKS > 0:
-            live = count_live()
             pending = len(_reservations)
-            if live + pending >= MAX_TASKS:
+            if count_owned() + pending >= MAX_TASKS:
                 raise Bad(
-                    "concurrency limit reached: %d devbox(es) running, DCA_MAX_TASKS=%d. "
-                    "Run `dc tasks`, then `dc rm <task>` for the box you finished with "
-                    "(a task can be reused after `dc rm`), or raise DCA_MAX_TASKS on the "
-                    "controller." % (live + pending, MAX_TASKS))
+                    "container limit reached: %d devbox container(s) exist, DCA_MAX_TASKS=%d. "
+                    "The cap now counts running AND stopped boxes: a stopped box still holds "
+                    "its build artifacts. Run `dc tasks`, then `dc rm <task>` for boxes you "
+                    "finished with, or `dc gc` to remove all stopped boxes."
+                    % (count_owned() + pending, MAX_TASKS))
         _reservations.add(task)
     try:
-        return _create_locked(task, tpl, work)
+        return _create_locked(task, tpl)
     finally:
         with _lock:
             _reservations.discard(task)
 
 
-def _create_locked(task, tpl, work):
-    """Create the container and provision it. Caller holds a reservation slot."""
+def _create_locked(task, tpl):
+    """Create the container and provision it. Caller holds a reservation slot. No host mount."""
+    wd = tpl["workdir"]
     args = [
         "run", "-d", "--name", cname(task),
         "--label", "devbox.owner=" + OWNER,
         "--label", "devbox.task=" + task,
         "--label", "devbox.template=" + tpl["name"],
+        "--label", "devbox.workdir=" + wd,
         "--cap-drop=ALL",
         "--security-opt", "no-new-privileges",
         "--pids-limit", str(tpl["pids"]),
         "--memory", tpl["memory"],
         "--cpus", tpl["cpus"],
         "--user", tpl["user"],
-        "-w", tpl["workdir"],
-        "-v", work + ":" + tpl["workdir"],
+        "-w", wd,
     ] + devbox_env_args() + [
         tpl["image"],
         "sleep", "infinity",
@@ -446,11 +460,16 @@ def _create_locked(task, tpl, work):
         args[args.index("-w"):args.index("-w")] = ["--network", net]
     docker(args, timeout=180, check=True)
     touch(task)
+    # Workspace is created INSIDE the container, owned by the devbox user. Nothing
+    # is bind-mounted from the host, so nothing on the host survives `dc rm`.
+    subprocess.run(
+        [DOCKER, "exec", "-u", "0", cname(task), "sh", "-c",
+         "mkdir -p " + shlex.quote(wd) + " && chown " + shlex.quote(tpl["user"]) + " " + shlex.quote(wd)],
+        capture_output=True, text=True, timeout=120)
     pkg_state = install_packages(task, tpl.get("packages") or [])
     git_state = configure_git(task, tpl)
     return {"task": task, "template": tpl["name"], "container": cname(task),
-            "workdir": tpl["workdir"], "host_path": work,
-            "packages": pkg_state, "git": git_state}
+            "workspace": wd, "packages": pkg_state, "git": git_state}
 
 
 def do_exec(task, payload):
@@ -500,63 +519,30 @@ def check_url(url):
     return url
 
 
-def relax_perms(root):
-    """Open new files/dirs to a+rwX so a devbox running as another uid can still write."""
-    try:
-        for dirpath, dirnames, filenames in os.walk(root):
-            os.chmod(dirpath, 0o777)
-            for name in filenames:
-                full = os.path.join(dirpath, name)
-                if os.path.islink(full):
-                    continue
-                mode = os.stat(full).st_mode
-                os.chmod(full, mode | 0o666 if (mode & 0o111) == 0 else mode | 0o777)
-    except OSError:
-        pass
-
-
-GIT_HELPER = (
-    "!f() { echo username=\\${DCA_GIT_USER:-x-access-token}; "
-    "echo password=\\${DCA_GIT_TOKEN}; }; f"
-)
-
-
-def git_env():
-    """Environment for git: no prompting; token exposed to the helper via env only."""
-    env = dict(os.environ)
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GIT_ASKPASS"] = "/bin/true"
-    if GIT_TOKEN:
-        env["DCA_GIT_TOKEN"] = GIT_TOKEN
-        env["DCA_GIT_USER"] = GIT_USER
-    return env
-
-
-def git_args(*args):
-    """Prefix git arguments with credential config when a token is configured."""
-    if not GIT_TOKEN:
-        return ["git"] + list(args)
-    return ["git", "-c", "credential.helper=",
-            "-c", "credential.helper=" + GIT_HELPER] + list(args)
-
-
 def do_clone(task, payload):
+    """Clone a repository INTO the container; no host path, no host mount, no host git."""
     require_container(task)
     url = check_url(payload.get("url"))
     sub = payload.get("dir", "")
     if sub and not NAME_RE.match(sub):
         raise Bad("invalid dir")
-    dest = work_path(task, sub or os.path.basename(urlparse(url).path).removesuffix(".git") or "repo")
-    if os.path.exists(dest) and os.listdir(dest):
-        raise Bad("target directory is not empty: " + dest)
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    proc = subprocess.run(git_args("clone", "--", url, dest), capture_output=True,
-                          text=True, timeout=600, env=git_env())
+    if not container_has_git(task):
+        raise Bad("git is not installed in this image: " + PKG_NOTE)
+    wd = container_workdir(task)
+    dest_name = sub or (os.path.basename(urlparse(url).path).removesuffix(".git") or "repo")
+    if not NAME_RE.match(dest_name):
+        raise Bad("invalid dir")
+    dest = wd.rstrip("/") + "/" + dest_name
+    user = container_user(task)
+    # git runs inside the container with the injected credential helper, so the
+    # token never appears in argv and never lands in a host directory.
+    proc = subprocess.run(
+        [DOCKER, "exec", "-u", user, cname(task), "git", "clone", "--", url, dest],
+        capture_output=True, text=True, timeout=600)
     touch(task)
     if proc.returncode != 0:
         raise Bad("git clone failed: " + (proc.stderr.strip()[-2000:] or "unknown"))
-    relax_perms(dest)
-    return {"path": dest, "rel": os.path.relpath(dest, work_path(task))}
+    return {"path": dest, "rel": os.path.relpath(dest, wd), "container": cname(task)}
 
 
 def do_stop(task):
@@ -567,10 +553,29 @@ def do_stop(task):
 
 def do_rm(task):
     require_container(task)
+    # -v removes anonymous volumes too; the container layer (and every build
+    # artifact in it) goes away with the container.
     docker(["rm", "-f", "-v", cname(task)], timeout=60, check=False)
     with _lock:
         _last_used.pop(task, None)
     return {"task": task, "removed": True}
+
+
+def do_gc():
+    """Remove all stopped owned containers, reclaiming their container layers."""
+    removed = []
+    for row in list_own():
+        if not row["status"].startswith("Up"):
+            task = row["task"]
+            try:
+                docker(["rm", "-f", "-v", cname(task)], timeout=60, check=False)
+                removed.append(task)
+            except Exception as exc:  # noqa: BLE001
+                print("[gc] %s: %s" % (task, exc), flush=True)
+    with _lock:
+        for task in removed:
+            _last_used.pop(task, None)
+    return {"removed": removed, "count": len(removed)}
 
 
 def touch(task):
@@ -588,14 +593,15 @@ def reaper():
         cutoff = time.time() - IDLE_HOURS * 3600
         for row in list_own():
             task = row["task"]
-            with _lock:
-                last = _last_used.get(task, 0)
-            if last and last < cutoff:
-                try:
-                    docker(["stop", cname(task)], timeout=60, check=False)
-                    print("[reaper] stopped idle task %s" % task, flush=True)
-                except Exception as exc:  # noqa: BLE001
-                    print("[reaper] %s: %s" % (task, exc), flush=True)
+            if row["status"].startswith("Up"):
+                with _lock:
+                    last = _last_used.get(task, 0)
+                if last and last < cutoff:
+                    try:
+                        docker(["stop", cname(task)], timeout=60, check=False)
+                        print("[reaper] stopped idle task %s" % task, flush=True)
+                    except Exception as exc:  # noqa: BLE001
+                        print("[reaper] %s: %s" % (task, exc), flush=True)
 
 
 # ---------------------------------------------------------------- HTTP
@@ -647,11 +653,13 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._body() if method in ("POST", "DELETE") else {}
             if method == "GET" and path == "/v1/health":
                 self._send(200, {"ok": True, "owner": OWNER, "max_tasks": MAX_TASKS,
-                             "live_tasks": count_live()})
+                                 "live_tasks": count_live(), "total_tasks": count_owned()})
             elif method == "GET" and path == "/v1/templates":
                 self._send(200, {"templates": list_templates()})
             elif method == "GET" and path == "/v1/tasks":
                 self._send(200, {"tasks": list_own()})
+            elif method == "POST" and path == "/v1/gc":
+                self._send(200, do_gc())
             elif method == "POST" and path == "/v1/tasks":
                 self._send(201, do_create(payload))
             elif method == "POST" and path.startswith("/v1/tasks/"):
@@ -699,36 +707,10 @@ def main():
     if not shutil.which(DOCKER):
         print("docker CLI not found on PATH", file=sys.stderr)
         return 2
-    try:
-        os.makedirs(WORK_ROOT, exist_ok=True)
-        probe = os.path.join(WORK_ROOT, ".write-probe")
-        with open(probe, "w") as fh:
-            fh.write("ok")
-        os.unlink(probe)
-    except OSError as exc:
-        print(
-            "WORK_ROOT is not writable: %s\n"
-            "  controller runs as uid=%d gid=%d inside its container.\n"
-            "  The host directory must be owned by (or writable by) that uid;\n"
-            "  a container cannot chown the host side itself.\n"
-            "\n"
-            "  On the host, either run the bundled setup (recommended, idempotent):\n"
-            "      ./setup.sh\n"
-            "  or do it by hand:\n"
-            "      sudo mkdir -p %s && sudo chown %d:%d %s\n"
-            "  or point DCA_HOST_WORK_ROOT at a directory that uid can already write,\n"
-            "  e.g. $PWD/work inside your clone of this repo.\n"
-            "\n"
-            "  underlying error: %s"
-            % (WORK_ROOT, os.getuid(), os.getgid(),
-               WORK_ROOT, os.getuid(), os.getgid(), WORK_ROOT, exc),
-            file=sys.stderr,
-        )
-        return 2
     threading.Thread(target=reaper, daemon=True).start()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
-    print("devbox controller listening on %s:%s (owner=%s, work_root=%s, network=%s)"
-          % (BIND, PORT, OWNER, WORK_ROOT, DEFAULT_NETWORK or "(docker default)"), flush=True)
+    print("devbox controller listening on %s:%s (owner=%s, max_tasks=%d, network=%s, workspace=container-only)"
+          % (BIND, PORT, OWNER, MAX_TASKS, DEFAULT_NETWORK or "(docker default)"), flush=True)
     srv.serve_forever()
     return 0
 

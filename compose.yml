@@ -7,14 +7,17 @@
 #
 # Container names: devbox-controller (controller), devbox-<task> (devbox)
 #
-# Authentication: Bearer token only (segmentation dropped: host cannot create networks)
+# Auth: Bearer token only (segmentation dropped: host cannot create networks)
 #   * controller uses network_mode: host and listens on 0.0.0.0:47123
 #   * the agent can stay on the default bridge and call the gateway,
 #     e.g. http://172.17.0.1:47123; on the host network use http://127.0.0.1:47123
 #   * devbox uses the default bridge (no --network flag), cannot reach host loopback
 #
-# Devbox egress follows the template network field (default = no --network flag);
-# to block internal ranges add nftables rules on the host (see README, egress).
+# 2026-11-25 rewrite: NO host workspace mount. Each devbox owns an ephemeral
+# /workspace inside its own container; a repository is cloned INTO that container
+# and every build artifact lives in the container layer. `dc rm` / `dc gc` removes
+# the container and everything it built. Nothing persists on the host disk.
+# Only two mounts remain: templates (read-only config) and the docker socket.
 
 services:
   controller:
@@ -29,7 +32,6 @@ services:
     environment:
       DCA_TOKEN: "${DCA_TOKEN:?set DCA_TOKEN in .env (>=16 characters)}"
       DCA_TEMPLATES_DIR: /templates
-      DCA_WORK_ROOT: "${DCA_HOST_WORK_ROOT:?set DCA_HOST_WORK_ROOT in .env}"
       DCA_BIND: "${DCA_BIND:-0.0.0.0}"
       DCA_PORT: "${DCA_PORT:-47123}"
       # Empty = no --network flag for devbox (docker default bridge); no network is created
@@ -37,25 +39,23 @@ services:
       DCA_OWNER: "${DCA_OWNER:-agent}"
       DCA_EXEC_TIMEOUT: "${DCA_EXEC_TIMEOUT:-900}"
       DCA_IDLE_HOURS: "${DCA_IDLE_HOURS:-0}"
-      # Hard cap on simultaneously running devboxes; 1 = one job at a time.
+      # Cap on the NUMBER of owned devbox containers (running AND stopped). Default 8.
       # 0 or negative disables the cap.
-      DCA_MAX_TASKS: "${DCA_MAX_TASKS:-1}"
+      DCA_MAX_TASKS: "${DCA_MAX_TASKS:-8}"
       DCA_ALLOW_TAGS: "${DCA_ALLOW_TAGS:-0}"
       DCA_ALLOW_PRIVATE_URL: "${DCA_ALLOW_PRIVATE_URL:-0}"
-      # Optional git credentials for dc clone only. The token stays on this side and is
-      # handed to git through a credential helper, never to the devbox.
+      # Optional git credentials, injected into each devbox for in-container clone.
       DCA_GIT_TOKEN: "${DCA_GIT_TOKEN:-}"
       DCA_GIT_USER: "${DCA_GIT_USER:-x-access-token}"
-      # Commit identity written into every devbox, plus the token, so the agent can
-      # git clone/commit/push inside the container. DCA_INJECT_GIT=0 keeps the token
-      # on this side only (push is always done inside the devbox).
+      # Commit identity written into every devbox, so the agent can git clone/commit/push
+      # inside the container with its own token. DCA_INJECT_GIT=0 keeps the token on this
+      # side (in-container clone then needs credentials another way).
       DCA_INJECT_GIT: "${DCA_INJECT_GIT:-1}"
       DCA_GIT_NAME: "${DCA_GIT_NAME:-sysnapse}"
       DCA_GIT_EMAIL: "${DCA_GIT_EMAIL:-8198069+sysnapse@users.noreply.github.com}"
       GIT_TERMINAL_PROMPT: "0"
     volumes:
-      # Must equal DCA_HOST_WORK_ROOT, or docker resolves the bind mount to an empty dir
-      - "${DCA_HOST_WORK_ROOT}:${DCA_HOST_WORK_ROOT}"
+      # Read-only template config only. No host workspace is mounted anywhere.
       - ./templates:/templates:ro
       - /var/run/docker.sock:/var/run/docker.sock
     security_opt:

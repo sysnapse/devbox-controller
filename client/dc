@@ -15,6 +15,12 @@ Usage:
   dc clone <task> <url> [dir]
   dc stop <task>
   dc rm <task>
+  dc gc
+
+2026-11-25: a devbox owns an ephemeral workspace INSIDE its container. `dc clone`
+clones a repository into that container with git; build artifacts (node_modules,
+cargo target, ...) stay in the container layer. `dc rm` removes one box, `dc gc`
+removes all stopped boxes. Nothing is mounted from or persists on the host disk.
 
 Inside a devbox (dc exec) git is ready to use: a commit identity is set and a
 credential helper reads /etc/devbox-git-token, so `git clone`, `git commit` and
@@ -207,6 +213,11 @@ def main(argv):
         need(args, 1, "dc rm <task>")
         code, body = call("DELETE", "/v1/tasks/%s" % args[0])
         print(json.dumps(body, ensure_ascii=False))
+        return 0 if code < 400 else 1
+
+    if cmd == "gc":
+        code, body = call("POST", "/v1/gc", {})
+        print(json.dumps(body, ensure_ascii=False, indent=2))
         return 0 if code < 400 else 1
 
     die("unknown subcommand: " + cmd)
