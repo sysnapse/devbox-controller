@@ -358,12 +358,21 @@ def install_packages(task, pkgs):
     if mgr == "apk":
         script = "apk add --no-cache " + names
     elif mgr == "apt-get":
-        # cap-drop=ALL drops CAP_SETGID, so apt's sandboxed fetch (setgroups to _apt)
-        # dies with "setgroups (1: Operation not permitted)". Run apt as root instead of
-        # weakening the container: -o APT::Sandbox::User=root.
-        APT = "apt-get -o APT::Sandbox::User=root "
-        script = (APT + "update -qq && DEBIAN_FRONTEND=noninteractive " +
-                  APT + "install -y -qq --no-install-recommends " + names +
+        # cap-drop=ALL drops CAP_SETGID *and* CAP_DAC_OVERRIDE, which breaks apt twice:
+        #  1. the sandboxed fetch (setgroups down to _apt) dies with
+        #     "setgroups (1: Operation not permitted)" -> run apt as root:
+        #     -o APT::Sandbox::User=root.
+        #  2. as root apt still cannot follow the image's 0700 _apt-owned
+        #     /var/cache/apt/archives/partial ("...deb - open (13: Permission denied)"),
+        #     because without CAP_DAC_OVERRIDE uid 0 is not exempt from permission bits,
+        #     and chown/chmod would need CAP_CHOWN/CAP_FOWNER. So download into a fresh
+        #     directory created by root itself, which root therefore owns.
+        CACHE = "/tmp/devbox-apt-archives"
+        APT = ("apt-get -o APT::Sandbox::User=root "
+               "-o Dir::Cache::archives=" + CACHE + " ")
+        script = ("mkdir -p " + CACHE + "/partial && " + APT + "update -qq && "
+                  "DEBIAN_FRONTEND=noninteractive " + APT +
+                  "install -y -qq --no-install-recommends " + names +
                   " && rm -rf /var/lib/apt/lists/*")
     elif mgr == "dnf":
         script = "dnf install -y -q " + names + " && dnf clean all"
